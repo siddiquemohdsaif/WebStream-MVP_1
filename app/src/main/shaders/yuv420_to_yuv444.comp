@@ -1,0 +1,70 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer SrcYuv420 {
+    uint src_words[];
+};
+
+layout(set = 0, binding = 1, std430) writeonly buffer DstYuv444 {
+    uint dst_words[];
+};
+
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    uint src_y_stride_words;
+    uint src_uv_stride_words;
+    uint src_y_plane_words;
+    uint src_uv_plane_words;
+    uint dst_stride_words;
+    uint dst_plane_words;
+} pc;
+
+uint loadPackedByte(uint base_word, uint stride_words, uint x, uint y) {
+    uint word = src_words[base_word + y * stride_words + (x >> 2u)];
+    return (word >> ((x & 3u) * 8u)) & 255u;
+}
+
+uint loadY(uint x, uint y) {
+    return loadPackedByte(0u, pc.src_y_stride_words, x, y);
+}
+
+uint loadU(uint x, uint y) {
+    uint base = pc.src_y_plane_words;
+    return loadPackedByte(base, pc.src_uv_stride_words, x >> 1u, y >> 1u);
+}
+
+uint loadV(uint x, uint y) {
+    uint base = pc.src_y_plane_words + pc.src_uv_plane_words;
+    return loadPackedByte(base, pc.src_uv_stride_words, x >> 1u, y >> 1u);
+}
+
+uint pack4(uint a, uint b, uint c, uint d) {
+    return (a & 255u) |
+           ((b & 255u) << 8u) |
+           ((c & 255u) << 16u) |
+           ((d & 255u) << 24u);
+}
+
+uint loadChannel(uint channel, uint x, uint y) {
+    if (channel == 0u) return loadY(x, y);
+    if (channel == 1u) return loadU(x, y);
+    return loadV(x, y);
+}
+
+void main() {
+    uint channel = gl_WorkGroupID.z;
+    uint y = gl_WorkGroupID.y;
+    uint word_x = gl_WorkGroupID.x * 32u + gl_LocalInvocationID.x;
+    if (word_x >= pc.dst_stride_words || y >= pc.height) return;
+
+    uint x = word_x * 4u;
+    uint p0 = x + 0u < pc.width ? loadChannel(channel, x + 0u, y) : 0u;
+    uint p1 = x + 1u < pc.width ? loadChannel(channel, x + 1u, y) : 0u;
+    uint p2 = x + 2u < pc.width ? loadChannel(channel, x + 2u, y) : 0u;
+    uint p3 = x + 3u < pc.width ? loadChannel(channel, x + 3u, y) : 0u;
+
+    dst_words[channel * pc.dst_plane_words + y * pc.dst_stride_words + word_x] =
+        pack4(p0, p1, p2, p3);
+}

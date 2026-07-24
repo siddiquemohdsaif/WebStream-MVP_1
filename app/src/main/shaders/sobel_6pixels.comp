@@ -1,0 +1,125 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels {
+    // One contiguous allocation: [packed Y][packed Cb/U][packed Cr/V].
+    uint words[];
+} inputImage;
+
+layout(set = 0, binding = 1, std430) writeonly buffer OutputPixels {
+    // Same planar layout as input: [Y mask][Cb mask][Cr mask].
+    uint words[];
+} outputImage;
+
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    uint inputStrideWords;
+    uint outputStrideWords;
+    uint inputPlaneWords;
+    uint outputPlaneWords;
+} params;
+
+uint byteAt(uint w0, uint w1, uint w2, uint w3, uint w4, uint indexInTwenty) {
+    uint shift = (indexInTwenty & 3u) * 8u;
+    uint word = w0;
+    if (indexInTwenty >= 16u) {
+        word = w4;
+    } else if (indexInTwenty >= 12u) {
+        word = w3;
+    } else if (indexInTwenty >= 8u) {
+        word = w2;
+    } else if (indexInTwenty >= 4u) {
+        word = w1;
+    }
+    return (word >> shift) & 255u;
+}
+
+uint sobelAt(uint tw0, uint tw1, uint tw2, uint tw3, uint tw4,
+             uint mw0, uint mw1, uint mw2, uint mw3, uint mw4,
+             uint bw0, uint bw1, uint bw2, uint bw3, uint bw4,
+             uint j, uint outputX, uint outputY) {
+    if (outputX >= params.width || outputY >= params.height ||
+        outputX == 0u || outputY == 0u ||
+        outputX + 1u == params.width || outputY + 1u == params.height) {
+        return 0u;
+    }
+
+    uint l = j;
+    uint c = j + 1u;
+    uint r = j + 2u;
+
+    int tl = int(byteAt(tw0, tw1, tw2, tw3, tw4, l));
+    int tc = int(byteAt(tw0, tw1, tw2, tw3, tw4, c));
+    int tr = int(byteAt(tw0, tw1, tw2, tw3, tw4, r));
+    int ml = int(byteAt(mw0, mw1, mw2, mw3, mw4, l));
+    int mr = int(byteAt(mw0, mw1, mw2, mw3, mw4, r));
+    int bl = int(byteAt(bw0, bw1, bw2, bw3, bw4, l));
+    int bc = int(byteAt(bw0, bw1, bw2, bw3, bw4, c));
+    int br = int(byteAt(bw0, bw1, bw2, bw3, bw4, r));
+
+    int gx = -tl + tr - 2 * ml + 2 * mr - bl + br;
+    int gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
+    int magnitude = int(sqrt(float(gx * gx + gy * gy)));
+    return uint(min(magnitude, 255));
+}
+
+uint pack4(uint a, uint b, uint c, uint d) {
+    return (a & 255u) | ((b & 255u) << 8u) |
+           ((c & 255u) << 16u) | ((d & 255u) << 24u);
+}
+
+void main() {
+    uint channel = gl_WorkGroupID.z;
+    uint outputY = gl_WorkGroupID.y;
+    uint segmentX = gl_WorkGroupID.x * 512u + gl_LocalInvocationID.x * 16u;
+    // channel 0 = Y, 1 = Cb/U, 2 = Cr/V inside one giant SSBO.
+    uint inputWordBase = channel * params.inputPlaneWords
+                       + outputY * params.inputStrideWords + (segmentX >> 2u);
+
+    uint tw0 = inputImage.words[inputWordBase + 0u];
+    uint tw1 = inputImage.words[inputWordBase + 1u];
+    uint tw2 = inputImage.words[inputWordBase + 2u];
+    uint tw3 = inputImage.words[inputWordBase + 3u];
+    uint tw4 = inputImage.words[inputWordBase + 4u];
+
+    uint midWordBase = inputWordBase + params.inputStrideWords;
+    uint mw0 = inputImage.words[midWordBase + 0u];
+    uint mw1 = inputImage.words[midWordBase + 1u];
+    uint mw2 = inputImage.words[midWordBase + 2u];
+    uint mw3 = inputImage.words[midWordBase + 3u];
+    uint mw4 = inputImage.words[midWordBase + 4u];
+
+    uint botWordBase = midWordBase + params.inputStrideWords;
+    uint bw0 = inputImage.words[botWordBase + 0u];
+    uint bw1 = inputImage.words[botWordBase + 1u];
+    uint bw2 = inputImage.words[botWordBase + 2u];
+    uint bw3 = inputImage.words[botWordBase + 3u];
+    uint bw4 = inputImage.words[botWordBase + 4u];
+
+    uint e0 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 0u, segmentX + 0u, outputY);
+    uint e1 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 1u, segmentX + 1u, outputY);
+    uint e2 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 2u, segmentX + 2u, outputY);
+    uint e3 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 3u, segmentX + 3u, outputY);
+    uint e4 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 4u, segmentX + 4u, outputY);
+    uint e5 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 5u, segmentX + 5u, outputY);
+    uint e6 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 6u, segmentX + 6u, outputY);
+    uint e7 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 7u, segmentX + 7u, outputY);
+    uint e8 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 8u, segmentX + 8u, outputY);
+    uint e9 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 9u, segmentX + 9u, outputY);
+    uint e10 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 10u, segmentX + 10u, outputY);
+    uint e11 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 11u, segmentX + 11u, outputY);
+    uint e12 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 12u, segmentX + 12u, outputY);
+    uint e13 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 13u, segmentX + 13u, outputY);
+    uint e14 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 14u, segmentX + 14u, outputY);
+    uint e15 = sobelAt(tw0, tw1, tw2, tw3, tw4, mw0, mw1, mw2, mw3, mw4, bw0, bw1, bw2, bw3, bw4, 15u, segmentX + 15u, outputY);
+
+    uint outputWordBase = channel * params.outputPlaneWords
+                        + outputY * params.outputStrideWords + (segmentX >> 2u);
+    outputImage.words[outputWordBase + 0u] = pack4(e0, e1, e2, e3);
+    outputImage.words[outputWordBase + 1u] = pack4(e4, e5, e6, e7);
+    outputImage.words[outputWordBase + 2u] = pack4(e8, e9, e10, e11);
+    outputImage.words[outputWordBase + 3u] = pack4(e12, e13, e14, e15);
+}
+

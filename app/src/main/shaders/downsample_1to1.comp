@@ -1,0 +1,23 @@
+#version 450
+
+// Packed YUV444 planar pass-through. One invocation copies four pixels.
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer SrcPlane { uint src_u32[]; };
+layout(binding = 1) writeonly buffer DstPlane { uint dst_u32[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint src_w_u32;
+    uint dst_w_u32;
+    uint dst_base_word;
+    uint tile_count_x;
+    uint tile_count_y;
+} pc;
+
+void main() {
+    uint word_x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (word_x >= pc.tile_count_x || y >= pc.tile_count_y) return;
+    dst_u32[pc.dst_base_word + y * pc.dst_w_u32 + word_x] =
+            src_u32[y * pc.src_w_u32 + word_x];
+}

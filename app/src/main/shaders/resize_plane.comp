@@ -1,0 +1,58 @@
+#version 450
+
+// Generic packed 8-bit plane resize. One invocation writes one u32 = four output pixels.
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer SrcPlane {
+    uint src_u32[];
+};
+
+layout(binding = 1) writeonly buffer DstPlane {
+    uint dst_u32[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint src_w_u32;
+    uint dst_w_u32;
+    uint dst_base_word;
+    uint src_w;
+    uint src_h;
+    uint dst_w;
+    uint dst_h;
+    uint dst_word_count_x;
+} pc;
+
+uint byte_at(uint packed, uint byte_index) {
+    return (packed >> (byte_index * 8u)) & 0xffu;
+}
+
+uint src_px(uint x, uint y) {
+    uint word = src_u32[y * pc.src_w_u32 + (x >> 2u)];
+    return byte_at(word, x & 3u);
+}
+
+uint pack_u8x4(uint a, uint b, uint c, uint d) {
+    return (a & 0xffu) |
+           ((b & 0xffu) << 8u) |
+           ((c & 0xffu) << 16u) |
+           ((d & 0xffu) << 24u);
+}
+
+uint resize_px(uint x, uint y) {
+    uint sx = min((x * pc.src_w) / pc.dst_w, pc.src_w - 1u);
+    uint sy = min((y * pc.src_h) / pc.dst_h, pc.src_h - 1u);
+    return src_px(sx, sy);
+}
+
+void main() {
+    uint word_x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (word_x >= pc.dst_word_count_x || y >= pc.dst_h) return;
+
+    uint x0 = word_x * 4u;
+    uint a = x0 + 0u < pc.dst_w ? resize_px(x0 + 0u, y) : 0u;
+    uint b = x0 + 1u < pc.dst_w ? resize_px(x0 + 1u, y) : 0u;
+    uint c = x0 + 2u < pc.dst_w ? resize_px(x0 + 2u, y) : 0u;
+    uint d = x0 + 3u < pc.dst_w ? resize_px(x0 + 3u, y) : 0u;
+    dst_u32[pc.dst_base_word + y * pc.dst_w_u32 + word_x] = pack_u8x4(a, b, c, d);
+}

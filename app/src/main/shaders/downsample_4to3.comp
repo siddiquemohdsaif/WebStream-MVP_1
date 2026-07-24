@@ -1,0 +1,160 @@
+#version 450
+
+// One invocation handles:
+//   input:  16x4 pixels = 4 u32 words per row * 4 rows
+//   output: 12x3 pixels = 3 u32 words per row * 3 rows
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer SrcPlane {
+    uint src_u32[];
+};
+
+layout(binding = 1) writeonly buffer DstPlane {
+    uint dst_u32[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint src_w_u32;
+    uint dst_w_u32;
+    uint dst_base_word;
+    uint tile_count_x;
+    uint tile_count_y;
+} pc;
+
+uint byte_at(uint packed, uint byte_index) {
+    return (packed >> (byte_index * 8u)) & 0xffu;
+}
+
+uint div16_round(uint value) {
+    return (value + 8u) >> 4u;
+}
+
+uint pack_u8x4(uint a, uint b, uint c, uint d) {
+    return (a & 0xffu) |
+           ((b & 0xffu) << 8u) |
+           ((c & 0xffu) << 16u) |
+           ((d & 0xffu) << 24u);
+}
+
+uint weight_4to3(uint out_index, uint src_index) {
+    if (out_index == 0u) {
+        if (src_index == 0u) return 3u;
+        if (src_index == 1u) return 1u;
+        return 0u;
+    }
+    if (out_index == 1u) {
+        if (src_index == 1u || src_index == 2u) return 2u;
+        return 0u;
+    }
+    if (src_index == 2u) return 1u;
+    if (src_index == 3u) return 3u;
+    return 0u;
+}
+
+uint px16(uint w0, uint w1, uint w2, uint w3, uint x) {
+    if (x < 4u) return byte_at(w0, x);
+    if (x < 8u) return byte_at(w1, x - 4u);
+    if (x < 12u) return byte_at(w2, x - 8u);
+    return byte_at(w3, x - 12u);
+}
+
+uint row_px(uint row_words[4], uint x) {
+    return px16(row_words[0], row_words[1], row_words[2], row_words[3], x);
+}
+
+uint eval_4to3(uint row0[4], uint row1[4], uint row2[4], uint row3[4],
+               uint src_x, uint out_x, uint out_y) {
+    uint rows[4][4] = uint[4][4](row0, row1, row2, row3);
+    uint sum = 0u;
+    for (uint y = 0u; y < 4u; ++y) {
+        uint wy = weight_4to3(out_y, y);
+        if (wy == 0u) continue;
+        for (uint x = 0u; x < 4u; ++x) {
+            uint wx = weight_4to3(out_x, x);
+            if (wx == 0u) continue;
+            sum += row_px(rows[y], src_x + x) * wx * wy;
+        }
+    }
+    return div16_round(sum);
+}
+
+void eval_group(uint row0[4], uint row1[4], uint row2[4], uint row3[4],
+                uint src_x,
+                out uint a0, out uint a1, out uint a2,
+                out uint b0, out uint b1, out uint b2,
+                out uint c0, out uint c1, out uint c2) {
+    a0 = eval_4to3(row0, row1, row2, row3, src_x, 0u, 0u);
+    a1 = eval_4to3(row0, row1, row2, row3, src_x, 1u, 0u);
+    a2 = eval_4to3(row0, row1, row2, row3, src_x, 2u, 0u);
+    b0 = eval_4to3(row0, row1, row2, row3, src_x, 0u, 1u);
+    b1 = eval_4to3(row0, row1, row2, row3, src_x, 1u, 1u);
+    b2 = eval_4to3(row0, row1, row2, row3, src_x, 2u, 1u);
+    c0 = eval_4to3(row0, row1, row2, row3, src_x, 0u, 2u);
+    c1 = eval_4to3(row0, row1, row2, row3, src_x, 1u, 2u);
+    c2 = eval_4to3(row0, row1, row2, row3, src_x, 2u, 2u);
+}
+
+void main() {
+    uint tile_x = gl_GlobalInvocationID.x;
+    uint tile_y = gl_GlobalInvocationID.y;
+    if (tile_x >= pc.tile_count_x || tile_y >= pc.tile_count_y) return;
+
+    uint src_word_x = tile_x * 4u;
+    uint src_y = tile_y * 4u;
+    uint dst_word_x = tile_x * 3u;
+    uint dst_y = tile_y * 3u;
+
+    uint row0[4] = uint[4](
+        src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 0u],
+        src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 1u],
+        src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 2u],
+        src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 3u]);
+    uint row1[4] = uint[4](
+        src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 0u],
+        src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 1u],
+        src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 2u],
+        src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 3u]);
+    uint row2[4] = uint[4](
+        src_u32[(src_y + 2u) * pc.src_w_u32 + src_word_x + 0u],
+        src_u32[(src_y + 2u) * pc.src_w_u32 + src_word_x + 1u],
+        src_u32[(src_y + 2u) * pc.src_w_u32 + src_word_x + 2u],
+        src_u32[(src_y + 2u) * pc.src_w_u32 + src_word_x + 3u]);
+    uint row3[4] = uint[4](
+        src_u32[(src_y + 3u) * pc.src_w_u32 + src_word_x + 0u],
+        src_u32[(src_y + 3u) * pc.src_w_u32 + src_word_x + 1u],
+        src_u32[(src_y + 3u) * pc.src_w_u32 + src_word_x + 2u],
+        src_u32[(src_y + 3u) * pc.src_w_u32 + src_word_x + 3u]);
+
+    uint r0_0, r0_1, r0_2, r1_0, r1_1, r1_2, r2_0, r2_1, r2_2;
+    uint r0_3, r0_4, r0_5, r1_3, r1_4, r1_5, r2_3, r2_4, r2_5;
+    uint r0_6, r0_7, r0_8, r1_6, r1_7, r1_8, r2_6, r2_7, r2_8;
+    uint r0_9, r0_10, r0_11, r1_9, r1_10, r1_11, r2_9, r2_10, r2_11;
+
+    eval_group(row0, row1, row2, row3, 0u,
+               r0_0, r0_1, r0_2, r1_0, r1_1, r1_2, r2_0, r2_1, r2_2);
+    eval_group(row0, row1, row2, row3, 4u,
+               r0_3, r0_4, r0_5, r1_3, r1_4, r1_5, r2_3, r2_4, r2_5);
+    eval_group(row0, row1, row2, row3, 8u,
+               r0_6, r0_7, r0_8, r1_6, r1_7, r1_8, r2_6, r2_7, r2_8);
+    eval_group(row0, row1, row2, row3, 12u,
+               r0_9, r0_10, r0_11, r1_9, r1_10, r1_11, r2_9, r2_10, r2_11);
+
+    dst_u32[pc.dst_base_word + (dst_y + 0u) * pc.dst_w_u32 + dst_word_x + 0u] =
+        pack_u8x4(r0_0, r0_1, r0_2, r0_3);
+    dst_u32[pc.dst_base_word + (dst_y + 0u) * pc.dst_w_u32 + dst_word_x + 1u] =
+        pack_u8x4(r0_4, r0_5, r0_6, r0_7);
+    dst_u32[pc.dst_base_word + (dst_y + 0u) * pc.dst_w_u32 + dst_word_x + 2u] =
+        pack_u8x4(r0_8, r0_9, r0_10, r0_11);
+    dst_u32[pc.dst_base_word + (dst_y + 1u) * pc.dst_w_u32 + dst_word_x + 0u] =
+        pack_u8x4(r1_0, r1_1, r1_2, r1_3);
+    dst_u32[pc.dst_base_word + (dst_y + 1u) * pc.dst_w_u32 + dst_word_x + 1u] =
+        pack_u8x4(r1_4, r1_5, r1_6, r1_7);
+    dst_u32[pc.dst_base_word + (dst_y + 1u) * pc.dst_w_u32 + dst_word_x + 2u] =
+        pack_u8x4(r1_8, r1_9, r1_10, r1_11);
+    dst_u32[pc.dst_base_word + (dst_y + 2u) * pc.dst_w_u32 + dst_word_x + 0u] =
+        pack_u8x4(r2_0, r2_1, r2_2, r2_3);
+    dst_u32[pc.dst_base_word + (dst_y + 2u) * pc.dst_w_u32 + dst_word_x + 1u] =
+        pack_u8x4(r2_4, r2_5, r2_6, r2_7);
+    dst_u32[pc.dst_base_word + (dst_y + 2u) * pc.dst_w_u32 + dst_word_x + 2u] =
+        pack_u8x4(r2_8, r2_9, r2_10, r2_11);
+}

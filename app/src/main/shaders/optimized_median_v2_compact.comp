@@ -1,0 +1,111 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels {
+    uint words[];
+} inputImage;
+
+layout(set = 0, binding = 1, std430) readonly buffer MaskPixels {
+    uint words[];
+} maskImage;
+
+layout(set = 0, binding = 2, std430) writeonly buffer OutputPixels {
+    uint words[];
+} outputImage;
+
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    uint strideWords;
+    uint planeWords;
+    uint edgeThresholdY;
+    uint edgeThresholdChroma;
+} params;
+
+uint loadInput(uint channel, uint x, uint y) {
+    uint word = inputImage.words[channel * params.planeWords + y * params.strideWords + (x >> 2u)];
+    return (word >> ((x & 3u) * 8u)) & 255u;
+}
+
+uint loadMask(uint channel, uint x, uint y) {
+    uint word = maskImage.words[channel * params.planeWords + y * params.strideWords + (x >> 2u)];
+    return (word >> ((x & 3u) * 8u)) & 255u;
+}
+
+void sort2(inout uint a, inout uint b) {
+    uint lo = min(a, b);
+    b = max(a, b);
+    a = lo;
+}
+
+void sort3(inout uint lo, inout uint mid, inout uint hi) {
+    sort2(lo, mid);
+    sort2(mid, hi);
+    sort2(lo, mid);
+}
+
+uint median3(uint a, uint b, uint c) {
+    sort2(a, b);
+    sort2(b, c);
+    sort2(a, b);
+    return b;
+}
+
+uint medianSortedColumns(uint l0, uint l1, uint l2,
+                         uint m0, uint m1, uint m2,
+                         uint r0, uint r1, uint r2) {
+    uint lowMax = max(max(l0, m0), r0);
+    uint midMed = median3(l1, m1, r1);
+    uint highMin = min(min(l2, m2), r2);
+    return median3(lowMax, midMed, highMin);
+}
+
+uint medianAt(uint channel, uint x, uint y) {
+    uint a0 = loadInput(channel, x - 1u, y - 1u);
+    uint a1 = loadInput(channel, x - 1u, y);
+    uint a2 = loadInput(channel, x - 1u, y + 1u);
+    sort3(a0, a1, a2);
+
+    uint b0 = loadInput(channel, x, y - 1u);
+    uint b1 = loadInput(channel, x, y);
+    uint b2 = loadInput(channel, x, y + 1u);
+    sort3(b0, b1, b2);
+
+    uint c0 = loadInput(channel, x + 1u, y - 1u);
+    uint c1 = loadInput(channel, x + 1u, y);
+    uint c2 = loadInput(channel, x + 1u, y + 1u);
+    sort3(c0, c1, c2);
+
+    return medianSortedColumns(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+}
+
+uint filteredAt(uint channel, uint x, uint y) {
+    uint original = loadInput(channel, x, y);
+    if (x == 0u || y == 0u || x + 1u >= params.width || y + 1u >= params.height) {
+        return original;
+    }
+    uint threshold = channel == 0u ? params.edgeThresholdY : params.edgeThresholdChroma;
+    return loadMask(channel, x, y) > threshold ? original : medianAt(channel, x, y);
+}
+
+uint pack4(uint a, uint b, uint c, uint d) {
+    return (a & 255u) | ((b & 255u) << 8u) |
+           ((c & 255u) << 16u) | ((d & 255u) << 24u);
+}
+
+void main() {
+    uint channel = gl_WorkGroupID.z;
+    uint y = gl_WorkGroupID.y;
+    uint wordX = gl_WorkGroupID.x * 32u + gl_LocalInvocationID.x;
+    if (wordX >= params.strideWords || y >= params.height) return;
+
+    uint x = wordX * 4u;
+    uint o0 = x + 0u < params.width ? filteredAt(channel, x + 0u, y) : 0u;
+    uint o1 = x + 1u < params.width ? filteredAt(channel, x + 1u, y) : 0u;
+    uint o2 = x + 2u < params.width ? filteredAt(channel, x + 2u, y) : 0u;
+    uint o3 = x + 3u < params.width ? filteredAt(channel, x + 3u, y) : 0u;
+
+    outputImage.words[channel * params.planeWords + y * params.strideWords + wordX] =
+        pack4(o0, o1, o2, o3);
+}

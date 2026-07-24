@@ -1,0 +1,67 @@
+#version 450
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer SrcPlane {
+    uint src_u32[];
+};
+
+layout(binding = 1) writeonly buffer DstPlane {
+    uint dst_u32[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint src_w_u32;
+    uint dst_w_u32;
+    uint dst_base_word;
+    uint tile_count_x;
+    uint tile_count_y;
+} pc;
+
+uint unpack_u8(uint packed, uint byte_index) {
+    return (packed >> (byte_index * 8u)) & 0xffu;
+}
+
+uint div4_round(uint value) {
+    return (value + 2u) >> 2u;
+}
+
+uint pack_u8x4(uint a, uint b, uint c, uint d) {
+    return (a & 0xffu) |
+           ((b & 0xffu) << 8u) |
+           ((c & 0xffu) << 16u) |
+           ((d & 0xffu) << 24u);
+}
+
+uint px(uint p0, uint p1, uint x) {
+    if (x < 4u) return unpack_u8(p0, x);
+    return unpack_u8(p1, x - 4u);
+}
+
+void main() {
+    uint tile_x = gl_GlobalInvocationID.x;
+    uint tile_y = gl_GlobalInvocationID.y;
+    if (tile_x >= pc.tile_count_x || tile_y >= pc.tile_count_y) return;
+
+    uint src_word_x = tile_x * 2u;
+    uint src_y = tile_y * 2u;
+    uint dst_word_x = tile_x;
+    uint dst_y = tile_y;
+
+    uint r0w0 = src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 0u];
+    uint r0w1 = src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 1u];
+    uint r1w0 = src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 0u];
+    uint r1w1 = src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 1u];
+
+    uint o0 = div4_round(px(r0w0, r0w1, 0u) + px(r0w0, r0w1, 1u) +
+                         px(r1w0, r1w1, 0u) + px(r1w0, r1w1, 1u));
+    uint o1 = div4_round(px(r0w0, r0w1, 2u) + px(r0w0, r0w1, 3u) +
+                         px(r1w0, r1w1, 2u) + px(r1w0, r1w1, 3u));
+    uint o2 = div4_round(px(r0w0, r0w1, 4u) + px(r0w0, r0w1, 5u) +
+                         px(r1w0, r1w1, 4u) + px(r1w0, r1w1, 5u));
+    uint o3 = div4_round(px(r0w0, r0w1, 6u) + px(r0w0, r0w1, 7u) +
+                         px(r1w0, r1w1, 6u) + px(r1w0, r1w1, 7u));
+
+    dst_u32[pc.dst_base_word + dst_y * pc.dst_w_u32 + dst_word_x] =
+        pack_u8x4(o0, o1, o2, o3);
+}

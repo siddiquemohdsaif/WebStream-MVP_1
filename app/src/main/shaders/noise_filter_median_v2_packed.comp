@@ -1,0 +1,147 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels {
+    uint words[];
+} inputImage;
+
+layout(set = 0, binding = 1, std430) readonly buffer MaskPixels {
+    uint words[];
+} maskImage;
+
+layout(set = 0, binding = 2, std430) writeonly buffer OutputPixels {
+    uint words[];
+} outputImage;
+
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    uint inputStrideWords;
+    uint outputStrideWords;
+    uint inputPlaneWords;
+    uint outputPlaneWords;
+    uint activeOutputWords;
+    uint edgeThresholdY;
+    uint edgeThresholdChroma;
+} params;
+
+uint edgeThresholdForCurrentChannel() {
+    return gl_WorkGroupID.z == 0u ? params.edgeThresholdY : params.edgeThresholdChroma;
+}
+
+uint byteAt2(uint w0, uint w1, uint indexInEight) {
+    uint word = indexInEight >= 4u ? w1 : w0;
+    return (word >> ((indexInEight & 3u) * 8u)) & 255u;
+}
+
+uint pack4(uint a, uint b, uint c, uint d) {
+    return (a & 255u) | ((b & 255u) << 8u) |
+           ((c & 255u) << 16u) | ((d & 255u) << 24u);
+}
+
+void sort2(inout uint a, inout uint b) {
+    uint lo = min(a, b);
+    b = max(a, b);
+    a = lo;
+}
+
+void sort3(inout uint lo, inout uint mid, inout uint hi) {
+    sort2(lo, mid);
+    sort2(mid, hi);
+    sort2(lo, mid);
+}
+
+uint median3(uint a, uint b, uint c) {
+    sort2(a, b);
+    sort2(b, c);
+    sort2(a, b);
+    return b;
+}
+
+// Exact median of 3 already-sorted columns:
+//
+//   a0 b0 c0  where a0<=a1<=a2,
+//   a1 b1 c1        b0<=b1<=b2,
+//   a2 b2 c2        c0<=c1<=c2
+//
+// median9 = median(max(low row), median(mid row), min(high row)).
+uint medianSortedColumns(uint l0, uint l1, uint l2,
+                         uint m0, uint m1, uint m2,
+                         uint r0, uint r1, uint r2) {
+    uint lowMax = max(max(l0, m0), r0);
+    uint midMed = median3(l1, m1, r1);
+    uint highMin = min(min(l2, m2), r2);
+    return median3(lowMax, midMed, highMin);
+}
+
+void main() {
+    uint channel = gl_WorkGroupID.z;
+    uint outputY = 1u + gl_WorkGroupID.y;
+    uint activeWord = gl_WorkGroupID.x * 32u + gl_LocalInvocationID.x;
+    if (activeWord >= params.activeOutputWords || outputY + 1u >= params.height) return;
+
+    uint planeBase = channel * params.inputPlaneWords;
+    uint topBase = planeBase + (outputY - 1u) * params.inputStrideWords + activeWord;
+    uint midBase = topBase + params.inputStrideWords;
+    uint botBase = midBase + params.inputStrideWords;
+
+    uint top0 = inputImage.words[topBase];
+    uint top1 = inputImage.words[topBase + 1u];
+    uint mid0 = inputImage.words[midBase];
+    uint mid1 = inputImage.words[midBase + 1u];
+    uint bot0 = inputImage.words[botBase];
+    uint bot1 = inputImage.words[botBase + 1u];
+    uint mask0 = maskImage.words[midBase];
+    uint mask1 = maskImage.words[midBase + 1u];
+
+    // Columns A..F cover the six pixels needed for centers b,c,d,e.
+    // Store each column as sorted low/mid/high in registers.
+    uint a0 = byteAt2(top0, top1, 0u);
+    uint a1 = byteAt2(mid0, mid1, 0u);
+    uint a2 = byteAt2(bot0, bot1, 0u);
+    sort3(a0, a1, a2);
+
+    uint b0 = byteAt2(top0, top1, 1u);
+    uint b1 = byteAt2(mid0, mid1, 1u);
+    uint b2 = byteAt2(bot0, bot1, 1u);
+    sort3(b0, b1, b2);
+
+    uint c0 = byteAt2(top0, top1, 2u);
+    uint c1 = byteAt2(mid0, mid1, 2u);
+    uint c2 = byteAt2(bot0, bot1, 2u);
+    sort3(c0, c1, c2);
+
+    uint d0 = byteAt2(top0, top1, 3u);
+    uint d1 = byteAt2(mid0, mid1, 3u);
+    uint d2 = byteAt2(bot0, bot1, 3u);
+    sort3(d0, d1, d2);
+
+    uint e0 = byteAt2(top0, top1, 4u);
+    uint e1 = byteAt2(mid0, mid1, 4u);
+    uint e2 = byteAt2(bot0, bot1, 4u);
+    sort3(e0, e1, e2);
+
+    uint f0 = byteAt2(top0, top1, 5u);
+    uint f1 = byteAt2(mid0, mid1, 5u);
+    uint f2 = byteAt2(bot0, bot1, 5u);
+    sort3(f0, f1, f2);
+
+    uint out0 = byteAt2(mask0, mask1, 1u) > edgeThresholdForCurrentChannel()
+              ? byteAt2(mid0, mid1, 1u)
+              : medianSortedColumns(a0, a1, a2, b0, b1, b2, c0, c1, c2);
+    uint out1 = byteAt2(mask0, mask1, 2u) > edgeThresholdForCurrentChannel()
+              ? byteAt2(mid0, mid1, 2u)
+              : medianSortedColumns(b0, b1, b2, c0, c1, c2, d0, d1, d2);
+    uint out2 = byteAt2(mask0, mask1, 3u) > edgeThresholdForCurrentChannel()
+              ? byteAt2(mid0, mid1, 3u)
+              : medianSortedColumns(c0, c1, c2, d0, d1, d2, e0, e1, e2);
+    uint out3 = byteAt2(mask0, mask1, 4u) > edgeThresholdForCurrentChannel()
+              ? byteAt2(mid0, mid1, 4u)
+              : medianSortedColumns(d0, d1, d2, e0, e1, e2, f0, f1, f2);
+
+    outputImage.words[channel * params.outputPlaneWords
+                    + outputY * params.outputStrideWords + activeWord] = pack4(out0, out1, out2, out3);
+}
+
+

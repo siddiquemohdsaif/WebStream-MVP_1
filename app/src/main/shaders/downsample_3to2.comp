@@ -1,0 +1,118 @@
+#version 450
+
+// One invocation handles:
+//   input:  12x3 pixels = 3 u32 words per row * 3 rows
+//   output:  8x2 pixels = 2 u32 words per row * 2 rows
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer SrcPlane {
+    uint src_u32[];
+};
+
+layout(binding = 1) writeonly buffer DstPlane {
+    uint dst_u32[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint src_w_u32;
+    uint dst_w_u32;
+    uint dst_base_word;
+    uint tile_count_x;
+    uint tile_count_y;
+} pc;
+
+uint byte_at(uint packed, uint byte_index) {
+    return (packed >> (byte_index * 8u)) & 0xffu;
+}
+
+uint div9_round(uint value) {
+    return (value + 4u) / 9u;
+}
+
+uint pack_u8x4(uint a, uint b, uint c, uint d) {
+    return (a & 0xffu) |
+           ((b & 0xffu) << 8u) |
+           ((c & 0xffu) << 16u) |
+           ((d & 0xffu) << 24u);
+}
+
+uint eval_3to2(uint A, uint B, uint C,
+               uint D, uint E, uint F,
+               uint G, uint H, uint I,
+               uint out_index) {
+    if (out_index == 0u) return div9_round(4u * A + 2u * B + 2u * D + E);
+    if (out_index == 1u) return div9_round(2u * B + 4u * C + E + 2u * F);
+    if (out_index == 2u) return div9_round(2u * D + E + 4u * G + 2u * H);
+    return div9_round(E + 2u * F + 2u * H + 4u * I);
+}
+
+uint px12(uint w0, uint w1, uint w2, uint x) {
+    if (x < 4u) return byte_at(w0, x);
+    if (x < 8u) return byte_at(w1, x - 4u);
+    return byte_at(w2, x - 8u);
+}
+
+void eval_group(uint row0_w0, uint row0_w1, uint row0_w2,
+                uint row1_w0, uint row1_w1, uint row1_w2,
+                uint row2_w0, uint row2_w1, uint row2_w2,
+                uint src_x, out uint top_left, out uint top_right,
+                out uint bottom_left, out uint bottom_right) {
+    uint A = px12(row0_w0, row0_w1, row0_w2, src_x + 0u);
+    uint B = px12(row0_w0, row0_w1, row0_w2, src_x + 1u);
+    uint C = px12(row0_w0, row0_w1, row0_w2, src_x + 2u);
+    uint D = px12(row1_w0, row1_w1, row1_w2, src_x + 0u);
+    uint E = px12(row1_w0, row1_w1, row1_w2, src_x + 1u);
+    uint F = px12(row1_w0, row1_w1, row1_w2, src_x + 2u);
+    uint G = px12(row2_w0, row2_w1, row2_w2, src_x + 0u);
+    uint H = px12(row2_w0, row2_w1, row2_w2, src_x + 1u);
+    uint I = px12(row2_w0, row2_w1, row2_w2, src_x + 2u);
+
+    top_left = eval_3to2(A, B, C, D, E, F, G, H, I, 0u);
+    top_right = eval_3to2(A, B, C, D, E, F, G, H, I, 1u);
+    bottom_left = eval_3to2(A, B, C, D, E, F, G, H, I, 2u);
+    bottom_right = eval_3to2(A, B, C, D, E, F, G, H, I, 3u);
+}
+
+void main() {
+    uint tile_x = gl_GlobalInvocationID.x;
+    uint tile_y = gl_GlobalInvocationID.y;
+    if (tile_x >= pc.tile_count_x || tile_y >= pc.tile_count_y) return;
+
+    uint src_word_x = tile_x * 3u;
+    uint src_y = tile_y * 3u;
+    uint dst_word_x = tile_x * 2u;
+    uint dst_y = tile_y * 2u;
+
+    uint row0_w0 = src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 0u];
+    uint row0_w1 = src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 1u];
+    uint row0_w2 = src_u32[(src_y + 0u) * pc.src_w_u32 + src_word_x + 2u];
+    uint row1_w0 = src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 0u];
+    uint row1_w1 = src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 1u];
+    uint row1_w2 = src_u32[(src_y + 1u) * pc.src_w_u32 + src_word_x + 2u];
+    uint row2_w0 = src_u32[(src_y + 2u) * pc.src_w_u32 + src_word_x + 0u];
+    uint row2_w1 = src_u32[(src_y + 2u) * pc.src_w_u32 + src_word_x + 1u];
+    uint row2_w2 = src_u32[(src_y + 2u) * pc.src_w_u32 + src_word_x + 2u];
+
+    uint r0_0, r0_1, r1_0, r1_1;
+    uint r0_2, r0_3, r1_2, r1_3;
+    uint r0_4, r0_5, r1_4, r1_5;
+    uint r0_6, r0_7, r1_6, r1_7;
+
+    eval_group(row0_w0, row0_w1, row0_w2, row1_w0, row1_w1, row1_w2,
+               row2_w0, row2_w1, row2_w2, 0u, r0_0, r0_1, r1_0, r1_1);
+    eval_group(row0_w0, row0_w1, row0_w2, row1_w0, row1_w1, row1_w2,
+               row2_w0, row2_w1, row2_w2, 3u, r0_2, r0_3, r1_2, r1_3);
+    eval_group(row0_w0, row0_w1, row0_w2, row1_w0, row1_w1, row1_w2,
+               row2_w0, row2_w1, row2_w2, 6u, r0_4, r0_5, r1_4, r1_5);
+    eval_group(row0_w0, row0_w1, row0_w2, row1_w0, row1_w1, row1_w2,
+               row2_w0, row2_w1, row2_w2, 9u, r0_6, r0_7, r1_6, r1_7);
+
+    dst_u32[pc.dst_base_word + (dst_y + 0u) * pc.dst_w_u32 + dst_word_x + 0u] =
+        pack_u8x4(r0_0, r0_1, r0_2, r0_3);
+    dst_u32[pc.dst_base_word + (dst_y + 0u) * pc.dst_w_u32 + dst_word_x + 1u] =
+        pack_u8x4(r0_4, r0_5, r0_6, r0_7);
+    dst_u32[pc.dst_base_word + (dst_y + 1u) * pc.dst_w_u32 + dst_word_x + 0u] =
+        pack_u8x4(r1_0, r1_1, r1_2, r1_3);
+    dst_u32[pc.dst_base_word + (dst_y + 1u) * pc.dst_w_u32 + dst_word_x + 1u] =
+        pack_u8x4(r1_4, r1_5, r1_6, r1_7);
+}

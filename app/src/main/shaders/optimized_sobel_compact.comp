@@ -1,0 +1,63 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels {
+    uint words[];
+} inputImage;
+
+layout(set = 0, binding = 1, std430) writeonly buffer OutputPixels {
+    uint words[];
+} outputImage;
+
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    uint strideWords;
+    uint planeWords;
+} params;
+
+uint loadPixel(uint channel, uint x, uint y) {
+    uint word = inputImage.words[channel * params.planeWords + y * params.strideWords + (x >> 2u)];
+    return (word >> ((x & 3u) * 8u)) & 255u;
+}
+
+uint sobelAt(uint channel, uint x, uint y) {
+    if (x == 0u || y == 0u || x + 1u >= params.width || y + 1u >= params.height) {
+        return 0u;
+    }
+
+    int tl = int(loadPixel(channel, x - 1u, y - 1u));
+    int tc = int(loadPixel(channel, x,      y - 1u));
+    int tr = int(loadPixel(channel, x + 1u, y - 1u));
+    int ml = int(loadPixel(channel, x - 1u, y));
+    int mr = int(loadPixel(channel, x + 1u, y));
+    int bl = int(loadPixel(channel, x - 1u, y + 1u));
+    int bc = int(loadPixel(channel, x,      y + 1u));
+    int br = int(loadPixel(channel, x + 1u, y + 1u));
+
+    int gx = -tl + tr - 2 * ml + 2 * mr - bl + br;
+    int gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
+    return uint(min(int(sqrt(float(gx * gx + gy * gy))), 255));
+}
+
+uint pack4(uint a, uint b, uint c, uint d) {
+    return (a & 255u) | ((b & 255u) << 8u) |
+           ((c & 255u) << 16u) | ((d & 255u) << 24u);
+}
+
+void main() {
+    uint channel = gl_WorkGroupID.z;
+    uint y = gl_WorkGroupID.y;
+    uint wordX = gl_WorkGroupID.x * 32u + gl_LocalInvocationID.x;
+    if (wordX >= params.strideWords || y >= params.height) return;
+
+    uint x = wordX * 4u;
+    uint e0 = x + 0u < params.width ? sobelAt(channel, x + 0u, y) : 0u;
+    uint e1 = x + 1u < params.width ? sobelAt(channel, x + 1u, y) : 0u;
+    uint e2 = x + 2u < params.width ? sobelAt(channel, x + 2u, y) : 0u;
+    uint e3 = x + 3u < params.width ? sobelAt(channel, x + 3u, y) : 0u;
+
+    outputImage.words[channel * params.planeWords + y * params.strideWords + wordX] =
+        pack4(e0, e1, e2, e3);
+}

@@ -1,0 +1,167 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+def glslang = new File(System.getenv("LOCALAPPDATA"),
+        "Android/Sdk/emulator/lib64/vulkan/glslangValidator.exe")
+def cameraVert = file("src/main/shaders/camera.vert")
+def cameraFrag = file("src/main/shaders/camera.frag")
+def cameraVertSpv = file("src/main/assets/camera.vert.spv")
+def cameraFragSpv = file("src/main/assets/camera.frag.spv")
+
+tasks.register("compileCameraVertexShader", Exec) {
+    inputs.file(cameraVert); outputs.file(cameraVertSpv)
+    doFirst { cameraVertSpv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            cameraVert.absolutePath, "-o", cameraVertSpv.absolutePath
+}
+tasks.register("compileCameraFragmentShader", Exec) {
+    inputs.file(cameraFrag); outputs.file(cameraFragSpv)
+    doFirst { cameraFragSpv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            cameraFrag.absolutePath, "-o", cameraFragSpv.absolutePath
+}
+
+def downsample4To2Comp = file("src/main/shaders/downsample_4to2.comp")
+def downsample4To3Comp = file("src/main/shaders/downsample_4to3.comp")
+def downsample3To2Comp = file("src/main/shaders/downsample_3to2.comp")
+def downsample1To1Comp = file("src/main/shaders/downsample_1to1.comp")
+def resizePlaneComp = file("src/main/shaders/resize_plane.comp")
+def yuv420To444Comp = file("src/main/shaders/yuv420_to_yuv444.comp")
+def sobel6PixelsComp = file("src/main/shaders/sobel_6pixels.comp")
+def medianV2Comp = file("src/main/shaders/noise_filter_median_v2_packed.comp")
+def optimizedSobelComp = file("src/main/shaders/optimized_sobel_compact.comp")
+def optimizedMedianComp = file("src/main/shaders/optimized_median_v2_compact.comp")
+def downsample4To2Spv = file("src/main/assets/downsample_4to2.comp.spv")
+def downsample4To3Spv = file("src/main/assets/downsample_4to3.comp.spv")
+def downsample3To2Spv = file("src/main/assets/downsample_3to2.comp.spv")
+def downsample1To1Spv = file("src/main/assets/downsample_1to1.comp.spv")
+def resizePlaneSpv = file("src/main/assets/resize_plane.comp.spv")
+def yuv420To444Spv = file("src/main/assets/yuv420_to_yuv444.comp.spv")
+def sobel6PixelsSpv = file("src/main/assets/sobel_6pixels.comp.spv")
+def medianV2Spv = file("src/main/assets/noise_filter_median_v2_packed.comp.spv")
+def optimizedSobelSpv = file("src/main/assets/optimized_sobel_compact.comp.spv")
+def optimizedMedianSpv = file("src/main/assets/optimized_median_v2_compact.comp.spv")
+
+tasks.register("compileDownsample4To2Shader", Exec) {
+    inputs.file(downsample4To2Comp); outputs.file(downsample4To2Spv)
+    doFirst { downsample4To2Spv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            downsample4To2Comp.absolutePath, "-o", downsample4To2Spv.absolutePath
+}
+tasks.register("compileDownsample4To3Shader", Exec) {
+    inputs.file(downsample4To3Comp); outputs.file(downsample4To3Spv)
+    doFirst { downsample4To3Spv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            downsample4To3Comp.absolutePath, "-o", downsample4To3Spv.absolutePath
+}
+tasks.register("compileDownsample3To2Shader", Exec) {
+    inputs.file(downsample3To2Comp); outputs.file(downsample3To2Spv)
+    doFirst { downsample3To2Spv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            downsample3To2Comp.absolutePath, "-o", downsample3To2Spv.absolutePath
+}
+tasks.register("compileDownsample1To1Shader", Exec) {
+    inputs.file(downsample1To1Comp); outputs.file(downsample1To1Spv)
+    doFirst { downsample1To1Spv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            downsample1To1Comp.absolutePath, "-o", downsample1To1Spv.absolutePath
+}
+tasks.register("compileResizePlaneShader", Exec) {
+    inputs.file(resizePlaneComp); outputs.file(resizePlaneSpv)
+    doFirst { resizePlaneSpv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            resizePlaneComp.absolutePath, "-o", resizePlaneSpv.absolutePath
+}
+tasks.register("compileYuv420To444Shader", Exec) {
+    inputs.file(yuv420To444Comp); outputs.file(yuv420To444Spv)
+    doFirst { yuv420To444Spv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            yuv420To444Comp.absolutePath, "-o", yuv420To444Spv.absolutePath
+}
+tasks.register("compileSobel6PixelsShader", Exec) {
+    inputs.file(sobel6PixelsComp); outputs.file(sobel6PixelsSpv)
+    doFirst { sobel6PixelsSpv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            sobel6PixelsComp.absolutePath, "-o", sobel6PixelsSpv.absolutePath
+}
+tasks.register("compileMedianV2Shader", Exec) {
+    inputs.file(medianV2Comp); outputs.file(medianV2Spv)
+    doFirst { medianV2Spv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            medianV2Comp.absolutePath, "-o", medianV2Spv.absolutePath
+}
+tasks.register("compileOptimizedSobelShader", Exec) {
+    inputs.file(optimizedSobelComp); outputs.file(optimizedSobelSpv)
+    doFirst { optimizedSobelSpv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            optimizedSobelComp.absolutePath, "-o", optimizedSobelSpv.absolutePath
+}
+tasks.register("compileOptimizedMedianShader", Exec) {
+    inputs.file(optimizedMedianComp); outputs.file(optimizedMedianSpv)
+    doFirst { optimizedMedianSpv.parentFile.mkdirs() }
+    commandLine glslang.absolutePath, "-V", "--target-env", "vulkan1.0",
+            optimizedMedianComp.absolutePath, "-o", optimizedMedianSpv.absolutePath
+}
+tasks.named("preBuild").configure {
+    dependsOn("compileCameraVertexShader", "compileCameraFragmentShader",
+            "compileDownsample4To2Shader", "compileDownsample4To3Shader", "compileDownsample3To2Shader",
+            "compileDownsample1To1Shader", "compileResizePlaneShader", "compileYuv420To444Shader",
+            "compileSobel6PixelsShader", "compileMedianV2Shader",
+            "compileOptimizedSobelShader", "compileOptimizedMedianShader")
+}
+
+android {
+    namespace 'app.builderx.ogfa.camerapipelinetest'
+    compileSdk {
+        version = release(36)
+    }
+
+    defaultConfig {
+        applicationId "app.builderx.ogfa.camerapipelinetest"
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17 -O3"
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    ndkVersion "28.2.13676358"
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+}
+
+dependencies {
+    implementation libs.appcompat
+    implementation libs.material
+    implementation libs.activity
+    implementation libs.constraintlayout
+    testImplementation libs.junit
+    androidTestImplementation libs.ext.junit
+    androidTestImplementation libs.espresso.core
+}
+
