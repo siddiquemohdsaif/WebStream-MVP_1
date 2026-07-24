@@ -18,6 +18,8 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
         findViewById(R.id.openCamera).setOnClickListener(view ->
                 startActivity(new Intent(this, CameraActivity.class)));
+        findViewById(R.id.startCall).setOnClickListener(view ->
+                startActivity(new Intent(this, StartCallActivity.class)));
         findViewById(R.id.openPreprocessing).setOnClickListener(view ->
                 startActivity(new Intent(this, PreprocessingTest.class)));
         findViewById(R.id.openOptimizedPreprocessing).setOnClickListener(view ->

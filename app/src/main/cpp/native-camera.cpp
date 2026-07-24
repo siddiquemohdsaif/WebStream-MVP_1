@@ -760,3 +760,77 @@ Java_app_builderx_ogfa_camerapipelinetest_CameraActivity_nativeCaptureFilteredYu
     }
     return result;
 }
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeStart(
+        JNIEnv* env, jclass, jboolean front, jint width, jint height) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    std::string result = camera()->start(front == JNI_TRUE, width, height);
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeStop(
+        JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    if (gCamera) gCamera->stop();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetMainPreviewRendering(
+        JNIEnv*, jclass, jboolean enabled) {
+    vulkanSetPreviewRenderingEnabled(enabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetSurface(
+        JNIEnv* env, jclass, jobject surface, jobject assetManager) {
+    if (!surface) {
+        cameraPreprocessGpuDestroy();
+        vulkanDestroy();
+        return env->NewStringUTF("Vulkan surface released");
+    }
+    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    AAssetManager* assets = AAssetManager_fromJava(env, assetManager);
+    if (!cameraPreprocessGpuLoadShaders(assets)) {
+        ANativeWindow_release(window);
+        return env->NewStringUTF("Error: failed to load camera preprocessing Vulkan shaders");
+    }
+    std::string result = vulkanSetWindow(window, assets);
+    ANativeWindow_release(window);
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetDisplayRotation(
+        JNIEnv*, jclass, jint rotationDegrees) {
+    camera_transform_set_display_rotation(rotationDegrees);
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeGetPreviewTransform(
+        JNIEnv* env, jclass) {
+    CameraTransformation transform = camera_transform_evaluate();
+    const jint values[2] = {
+            static_cast<jint>(transform.rotation),
+            transform.mirror ? 1 : 0
+    };
+    jintArray result = env->NewIntArray(2);
+    if (!result) return nullptr;
+    env->SetIntArrayRegion(result, 0, 2, values);
+    return result;
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeCaptureLatestFilteredArgb(
+        JNIEnv* env, jclass, jintArray dimensions) {
+    return Java_app_builderx_ogfa_camerapipelinetest_CameraActivity_nativeCaptureLatestFilteredArgb(
+            env, nullptr, dimensions);
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeCaptureFilteredYuv420Ring(
+        JNIEnv* env, jclass, jintArray info) {
+    return Java_app_builderx_ogfa_camerapipelinetest_CameraActivity_nativeCaptureFilteredYuv420Ring(
+            env, nullptr, info);
+}

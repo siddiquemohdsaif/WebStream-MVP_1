@@ -21,6 +21,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.CameraPipelineTest">
         <activity
+            android:name=".StartCallActivity"
+            android:exported="false" />
+        <activity
             android:name=".VulkanFeatureTestActivity"
             android:exported="false" />
         <activity

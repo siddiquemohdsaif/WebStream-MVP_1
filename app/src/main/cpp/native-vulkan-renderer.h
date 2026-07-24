@@ -8,6 +8,7 @@
 
 std::string vulkanSetWindow(ANativeWindow* window, AAssetManager* assets);
 void vulkanDestroy();
+void vulkanSetPreviewRenderingEnabled(bool enabled);
 void vulkanSubmitYuv420(const uint8_t* y, const uint8_t* u, const uint8_t* v,
                         int width, int height, uint16_t rotation, bool mirror);
 void vulkanSubmitYuv444(const uint8_t* y, const uint8_t* u, const uint8_t* v,
