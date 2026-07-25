@@ -4,13 +4,16 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 #include <android/asset_manager_jni.h>
+#include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include "native-vulkan-renderer.h"
 #include "camera_transformation_evaluator.h"
 #include "camera_preprocess_pipeline.h"
+#include "native-yuv-jpeg.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -19,10 +22,12 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "NativeCamera", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "NativeCamera", __VA_ARGS__)
+#define LOGC(...) __android_log_print(ANDROID_LOG_DEBUG, "CALL_PIPELINE", __VA_ARGS__)
 
 namespace {
 
@@ -38,6 +43,16 @@ constexpr CameraPipelineFormat kCameraPipelineFormat = CameraPipelineFormat::Yuv
 // Supported targets: 2560x1440, 1920x1080, 1280x720, 854x480, 640x360.
 constexpr int kCameraDesiredOutputWidth = 1280;
 constexpr int kCameraDesiredOutputHeight = 720;
+
+int64_t wallTimeMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+double elapsedMs(std::chrono::steady_clock::time_point start,
+                 std::chrono::steady_clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 class NativeYuvCamera {
 public:
@@ -644,12 +659,351 @@ private:
     ACameraCaptureSession_stateCallbacks sessionCallbacks_{};
 };
 
+class LatestFilteredFrameWorker {
+public:
+    ~LatestFilteredFrameWorker() { shutdown(); }
+
+    void start(JNIEnv* env, jobject source) {
+        stop();
+        releaseSource(env);
+        if (!source) return;
+        javaVm_ = nullptr;
+        env->GetJavaVM(&javaVm_);
+        source_ = env->NewGlobalRef(source);
+        jclass sourceClass = env->GetObjectClass(source);
+        getMaxFps_ = env->GetMethodID(sourceClass, "getMaxFps", "()I");
+        onLatestFilteredJpeg_ = env->GetMethodID(
+                sourceClass,
+                "onLatestFilteredJpeg",
+                "([BIIJ)Lapp/builderx/ogfa/camerapipelinetest/LatestFilteredFrameWorker$SendResult;");
+        int maxFps = getMaxFps_ ? env->CallIntMethod(source, getMaxFps_) : 15;
+        if (maxFps <= 0) maxFps = 15;
+        intervalMs_ = std::max(1, 1000 / maxFps);
+        running_ = true;
+        worker_ = std::thread(&LatestFilteredFrameWorker::run, this);
+    }
+
+    void stop() {
+        running_ = false;
+        if (worker_.joinable()) worker_.join();
+    }
+
+    void shutdown() {
+        stop();
+        releaseSource(nullptr);
+    }
+
+private:
+    struct LatestYuvFrame {
+        std::vector<uint8_t> yuv;
+        int width = 0;
+        int height = 0;
+        int yStride = 0;
+        int uvStride = 0;
+        int yPlaneBytes = 0;
+        int uvPlaneBytes = 0;
+        uint64_t version = 0;
+    };
+
+    void releaseSource(JNIEnv* existingEnv) {
+        if (source_ && javaVm_) {
+            JNIEnv* env = existingEnv;
+            bool attached = false;
+            if (!env && javaVm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+                if (javaVm_->AttachCurrentThread(&env, nullptr) == JNI_OK) attached = true;
+            }
+            if (env) env->DeleteGlobalRef(source_);
+            if (attached) javaVm_->DetachCurrentThread();
+        }
+        source_ = nullptr;
+        javaVm_ = nullptr;
+        getMaxFps_ = nullptr;
+        onLatestFilteredJpeg_ = nullptr;
+    }
+
+    bool updateLatestFilteredYuvBuffer(double& copyMs) {
+        LatestYuvFrame frame;
+        const auto copyStart = std::chrono::steady_clock::now();
+        const bool copied = vulkanCopyLatestFilteredYuv420(
+                frame.yuv,
+                frame.width,
+                frame.height,
+                frame.yStride,
+                frame.uvStride,
+                frame.yPlaneBytes,
+                frame.uvPlaneBytes);
+        const auto copyEnd = std::chrono::steady_clock::now();
+        copyMs = elapsedMs(copyStart, copyEnd);
+        if (!copied ||
+            static_cast<size_t>(frame.yPlaneBytes + 2 * frame.uvPlaneBytes) > frame.yuv.size()) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(latestYuvMutex_);
+        frame.version = ++latestYuvVersion_;
+        latestYuvFrame_ = std::move(frame);
+        latestYuvConsumed_ = false;
+        return true;
+    }
+
+    bool fetchLatestFilteredYuvBuffer(LatestYuvFrame& frame) {
+        std::lock_guard<std::mutex> lock(latestYuvMutex_);
+        if (latestYuvConsumed_ || latestYuvFrame_.yuv.empty()) {
+            return false;
+        }
+        frame = latestYuvFrame_;
+        latestYuvConsumed_ = true;
+        return true;
+    }
+
+    void run() {
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (javaVm_ &&
+            javaVm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+            if (javaVm_->AttachCurrentThread(&env, nullptr) == JNI_OK) attached = true;
+        }
+        auto nextTick = std::chrono::steady_clock::now();
+        while (running_) {
+            nextTick += std::chrono::milliseconds(intervalMs_);
+            if (!running_) break;
+            const auto totalStart = std::chrono::steady_clock::now();
+            double copyMs = 0.0;
+            if (vulkanConsumeLatestFilteredFramePresent()) {
+                if (!updateLatestFilteredYuvBuffer(copyMs)) {
+                    LOGC("worker_yuv_buffer_update_drop | t=%lld copyMs=%.3f",
+                         static_cast<long long>(wallTimeMs()),
+                         copyMs);
+                    LOGE("LatestFrameAvail | failed to copy latest filtered YUV420 into worker buffer");
+                    sleepUntilNextTick(nextTick);
+                    continue;
+                }
+            }
+
+            LatestYuvFrame frame;
+            if (!fetchLatestFilteredYuvBuffer(frame)) {
+                sleepUntilNextTick(nextTick);
+                continue;
+            }
+
+            std::vector<uint8_t> jpeg;
+            const auto encodeStart = std::chrono::steady_clock::now();
+            const bool encoded = nativeYuv420ToJpeg(frame.yuv.data(),
+                                                    frame.yuv.data() + frame.yPlaneBytes,
+                                                    frame.yuv.data() + frame.yPlaneBytes + frame.uvPlaneBytes,
+                                                    frame.width,
+                                                    frame.height,
+                                                    frame.yStride,
+                                                    frame.uvStride,
+                                                    80,
+                                                    jpeg);
+            const auto encodeEnd = std::chrono::steady_clock::now();
+            if (encoded) {
+                    LOGI("LatestFrameAvail | jpeg=%zu bytes | %dx%d", jpeg.size(), frame.width, frame.height);
+                    if (env && source_ && onLatestFilteredJpeg_) {
+                        const auto callbackStart = std::chrono::steady_clock::now();
+                        bool sent = false;
+                        bool queued = false;
+                        jlong sequence = 0;
+                        double javaSendMs = 0.0;
+                        jbyteArray jpegArray = env->NewByteArray(static_cast<jsize>(jpeg.size()));
+                        if (jpegArray) {
+                            env->SetByteArrayRegion(
+                                    jpegArray,
+                                    0,
+                                    static_cast<jsize>(jpeg.size()),
+                                    reinterpret_cast<const jbyte*>(jpeg.data()));
+                            jobject sendResult = env->CallObjectMethod(
+                                    source_,
+                                    onLatestFilteredJpeg_,
+                                    jpegArray,
+                                    static_cast<jint>(frame.width),
+                                    static_cast<jint>(frame.height),
+                                    static_cast<jlong>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch()).count()));
+                            if (env->ExceptionCheck()) {
+                                env->ExceptionDescribe();
+                                env->ExceptionClear();
+                            }
+                            if (sendResult) {
+                                jclass resultClass = env->GetObjectClass(sendResult);
+                                jfieldID sentField = env->GetFieldID(resultClass, "sent", "Z");
+                                jfieldID queuedField = env->GetFieldID(resultClass, "queued", "Z");
+                                jfieldID sequenceField = env->GetFieldID(resultClass, "sequence", "J");
+                                jfieldID elapsedField = env->GetFieldID(resultClass, "elapsedMs", "D");
+                                if (sentField) sent = env->GetBooleanField(sendResult, sentField) == JNI_TRUE;
+                                if (queuedField) queued = env->GetBooleanField(sendResult, queuedField) == JNI_TRUE;
+                                if (sequenceField) sequence = env->GetLongField(sendResult, sequenceField);
+                                if (elapsedField) javaSendMs = env->GetDoubleField(sendResult, elapsedField);
+                                env->DeleteLocalRef(resultClass);
+                                env->DeleteLocalRef(sendResult);
+                            }
+                            env->DeleteLocalRef(jpegArray);
+                        }
+                        const auto callbackEnd = std::chrono::steady_clock::now();
+                        LOGC("Send Frame %lld: camera to filtered yuv420 bufferVersion=%lld copyMs=%.3f yuvBytes=%zu, filtered yuv420 to jpeg encodeMs=%.3f jpegBytes=%zu size=%dx%d, jpeg callback callbackMs=%.3f, jpeg send websocket sent=%s queued=%s seq=%lld sendMs=%.3f totalMs=%.3f t=%lld",
+                             static_cast<long long>(sendFrameIndex_++),
+                             static_cast<long long>(frame.version),
+                             copyMs,
+                             frame.yuv.size(),
+                             elapsedMs(encodeStart, encodeEnd),
+                             jpeg.size(),
+                             frame.width,
+                             frame.height,
+                             elapsedMs(callbackStart, callbackEnd),
+                             sent ? "true" : "false",
+                             queued ? "true" : "false",
+                             static_cast<long long>(sequence),
+                             javaSendMs,
+                             elapsedMs(totalStart, callbackEnd),
+                             static_cast<long long>(wallTimeMs()));
+                    }
+                } else {
+                    LOGC("worker_encode_drop | t=%lld bufferVersion=%lld yuvBytes=%zu size=%dx%d",
+                         static_cast<long long>(wallTimeMs()),
+                         static_cast<long long>(frame.version),
+                         frame.yuv.size(),
+                         frame.width,
+                         frame.height);
+                    LOGE("LatestFrameAvail | failed to copy/encode latest filtered YUV420");
+                }
+            sleepUntilNextTick(nextTick);
+        }
+        if (attached && javaVm_) javaVm_->DetachCurrentThread();
+    }
+
+    void sleepUntilNextTick(std::chrono::steady_clock::time_point& nextTick) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < nextTick) {
+            std::this_thread::sleep_until(nextTick);
+        } else {
+            nextTick = now;
+        }
+    }
+
+    std::atomic<bool> running_{false};
+    int intervalMs_ = 66;
+    uint64_t sendFrameIndex_ = 1;
+    std::mutex latestYuvMutex_;
+    LatestYuvFrame latestYuvFrame_;
+    bool latestYuvConsumed_ = true;
+    uint64_t latestYuvVersion_ = 0;
+    std::thread worker_;
+    JavaVM* javaVm_ = nullptr;
+    jobject source_ = nullptr;
+    jmethodID getMaxFps_ = nullptr;
+    jmethodID onLatestFilteredJpeg_ = nullptr;
+};
+
 std::mutex gMutex;
 std::unique_ptr<NativeYuvCamera> gCamera;
+LatestFilteredFrameWorker gLatestFilteredFrameWorker;
+std::mutex gRemoteWindowMutex;
+ANativeWindow* gRemoteWindow = nullptr;
+std::atomic<uint64_t> gReceivedFrameIndex{1};
 
 NativeYuvCamera* camera() {
     if (!gCamera) gCamera = std::make_unique<NativeYuvCamera>();
     return gCamera.get();
+}
+
+uint8_t clampByte(int value) {
+    return static_cast<uint8_t>(std::max(0, std::min(255, value)));
+}
+
+uint32_t yuvToRgba8888(uint8_t yValue, uint8_t uValue, uint8_t vValue) {
+    const int c = static_cast<int>(yValue) - 16;
+    const int d = static_cast<int>(uValue) - 128;
+    const int e = static_cast<int>(vValue) - 128;
+    const uint8_t rByte = clampByte((298 * c + 409 * e + 128) >> 8);
+    const uint8_t gByte = clampByte((298 * c - 100 * d - 208 * e + 128) >> 8);
+    const uint8_t bByte = clampByte((298 * c + 516 * d + 128) >> 8);
+    return 0xff000000u |
+           (static_cast<uint32_t>(bByte) << 16u) |
+           (static_cast<uint32_t>(gByte) << 8u) |
+           static_cast<uint32_t>(rByte);
+}
+
+bool renderYuv420ToRemoteWindow(const std::vector<uint8_t>& y,
+                                const std::vector<uint8_t>& u,
+                                const std::vector<uint8_t>& v,
+                                int width,
+                                int height,
+                                int rotationDegrees,
+                                bool mirror) {
+    std::lock_guard<std::mutex> lock(gRemoteWindowMutex);
+    if (!gRemoteWindow || width <= 0 || height <= 0 ||
+        y.size() < static_cast<size_t>(width) * height ||
+        u.size() < static_cast<size_t>(width / 2) * (height / 2) ||
+        v.size() < static_cast<size_t>(width / 2) * (height / 2)) {
+        return false;
+    }
+
+    ANativeWindow_setBuffersGeometry(gRemoteWindow, 0, 0, WINDOW_FORMAT_RGBA_8888);
+    ANativeWindow_Buffer buffer{};
+    if (ANativeWindow_lock(gRemoteWindow, &buffer, nullptr) != 0 || !buffer.bits) {
+        return false;
+    }
+
+    auto* pixels = static_cast<uint32_t*>(buffer.bits);
+    const int dstWidth = buffer.width;
+    const int dstHeight = buffer.height;
+    const int dstStride = buffer.stride;
+    for (int row = 0; row < dstHeight; ++row) {
+        uint32_t* out = pixels + static_cast<size_t>(row) * dstStride;
+        std::fill(out, out + dstWidth, 0xff000000u);
+    }
+
+    const int rotation = ((rotationDegrees % 360) + 360) % 360;
+    const bool quarterTurn = rotation == 90 || rotation == 270;
+    const float imageAspect = quarterTurn
+            ? static_cast<float>(height) / static_cast<float>(width)
+            : static_cast<float>(width) / static_cast<float>(height);
+    const float surfaceAspect = static_cast<float>(dstWidth) / static_cast<float>(dstHeight);
+    int drawWidth = dstWidth;
+    int drawHeight = dstHeight;
+    int drawX = 0;
+    int drawY = 0;
+    if (imageAspect > surfaceAspect) {
+        drawHeight = std::max(1, static_cast<int>(dstWidth / imageAspect));
+        drawY = (dstHeight - drawHeight) / 2;
+    } else {
+        drawWidth = std::max(1, static_cast<int>(dstHeight * imageAspect));
+        drawX = (dstWidth - drawWidth) / 2;
+    }
+
+    for (int dy = 0; dy < drawHeight; ++dy) {
+        const float ny = (static_cast<float>(dy) + 0.5f) / static_cast<float>(drawHeight);
+        uint32_t* out = pixels + static_cast<size_t>(drawY + dy) * dstStride + drawX;
+        for (int dx = 0; dx < drawWidth; ++dx) {
+            float nx = (static_cast<float>(dx) + 0.5f) / static_cast<float>(drawWidth);
+            if (mirror) nx = 1.0f - nx;
+
+            float sxNorm = nx;
+            float syNorm = ny;
+            if (rotation == 90) {
+                sxNorm = ny;
+                syNorm = 1.0f - nx;
+            } else if (rotation == 180) {
+                sxNorm = 1.0f - nx;
+                syNorm = 1.0f - ny;
+            } else if (rotation == 270) {
+                sxNorm = 1.0f - ny;
+                syNorm = nx;
+            }
+
+            const int sx = std::max(0, std::min(width - 1,
+                    static_cast<int>(sxNorm * static_cast<float>(width))));
+            const int sy = std::max(0, std::min(height - 1,
+                    static_cast<int>(syNorm * static_cast<float>(height))));
+            const size_t yIndex = static_cast<size_t>(sy) * width + sx;
+            const size_t uvIndex = static_cast<size_t>(sy / 2) * (width / 2) + (sx / 2);
+            out[dx] = yuvToRgba8888(y[yIndex], u[uvIndex], v[uvIndex]);
+        }
+    }
+
+    ANativeWindow_unlockAndPost(gRemoteWindow);
+    return true;
 }
 
 }  // namespace
@@ -777,6 +1131,24 @@ Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeStop(
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_LatestFilteredFrameWorker_nativeStart(
+        JNIEnv* env, jclass, jobject source) {
+    gLatestFilteredFrameWorker.start(env, source);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_LatestFilteredFrameWorker_nativeStop(
+        JNIEnv*, jclass) {
+    gLatestFilteredFrameWorker.stop();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_LatestFilteredFrameWorker_nativeShutdown(
+        JNIEnv*, jclass) {
+    gLatestFilteredFrameWorker.shutdown();
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetMainPreviewRendering(
         JNIEnv*, jclass, jboolean enabled) {
     vulkanSetPreviewRenderingEnabled(enabled == JNI_TRUE);
@@ -799,6 +1171,92 @@ Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetSurface(
     std::string result = vulkanSetWindow(window, assets);
     ANativeWindow_release(window);
     return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetRemoteSurface(
+        JNIEnv* env, jclass, jobject surface) {
+    std::lock_guard<std::mutex> lock(gRemoteWindowMutex);
+    if (gRemoteWindow) {
+        ANativeWindow_release(gRemoteWindow);
+        gRemoteWindow = nullptr;
+    }
+    if (!surface) {
+        return env->NewStringUTF("Remote main SurfaceView released");
+    }
+    gRemoteWindow = ANativeWindow_fromSurface(env, surface);
+    if (!gRemoteWindow) {
+        return env->NewStringUTF("Error: failed to acquire remote main SurfaceView");
+    }
+    ANativeWindow_setBuffersGeometry(gRemoteWindow, 0, 0, WINDOW_FORMAT_RGBA_8888);
+    std::ostringstream out;
+    out << "Remote main SurfaceView ready";
+    return env->NewStringUTF(out.str().c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeRenderJpegToMainSurface(
+        JNIEnv* env, jclass, jbyteArray jpegFrame, jint rotationDegrees, jboolean mirrorFrame) {
+    const auto totalStart = std::chrono::steady_clock::now();
+    if (!jpegFrame) return JNI_FALSE;
+    const jsize jpegSize = env->GetArrayLength(jpegFrame);
+    if (jpegSize <= 0) return JNI_FALSE;
+
+    const auto javaCopyStart = std::chrono::steady_clock::now();
+    std::vector<uint8_t> jpeg(static_cast<size_t>(jpegSize));
+    env->GetByteArrayRegion(
+            jpegFrame,
+            0,
+            jpegSize,
+            reinterpret_cast<jbyte*>(jpeg.data()));
+    if (env->ExceptionCheck()) return JNI_FALSE;
+    const auto javaCopyEnd = std::chrono::steady_clock::now();
+
+    std::vector<uint8_t> y;
+    std::vector<uint8_t> u;
+    std::vector<uint8_t> v;
+    int width = 0;
+    int height = 0;
+    const auto decodeStart = std::chrono::steady_clock::now();
+    if (!nativeJpegToYuv420(jpeg.data(), jpeg.size(), y, u, v, width, height)) {
+        const auto decodeEnd = std::chrono::steady_clock::now();
+        LOGC("native_render_received_jpeg_drop | t=%lld reason=decode_failed jpegBytes=%d javaCopyMs=%.3f decodeMs=%.3f",
+             static_cast<long long>(wallTimeMs()),
+             jpegSize,
+             elapsedMs(javaCopyStart, javaCopyEnd),
+             elapsedMs(decodeStart, decodeEnd));
+        LOGE("Received JPEG decode to YUV420 failed | jpeg=%d bytes", jpegSize);
+        return JNI_FALSE;
+    }
+    const auto decodeEnd = std::chrono::steady_clock::now();
+    const auto drawStart = std::chrono::steady_clock::now();
+    const bool rendered = renderYuv420ToRemoteWindow(
+            y,
+            u,
+            v,
+            width,
+            height,
+            static_cast<int>(rotationDegrees),
+            mirrorFrame == JNI_TRUE);
+    const auto drawEnd = std::chrono::steady_clock::now();
+    LOGC("Received Frame %lld: received callback javaCopyMs=%.3f jpegBytes=%d, jpeg to yuv420 decodeMs=%.3f yuvSize=%dx%d, yuv420 to render rendered=%s drawMs=%.3f totalMs=%.3f t=%lld",
+         static_cast<long long>(gReceivedFrameIndex.fetch_add(1)),
+         elapsedMs(javaCopyStart, javaCopyEnd),
+         jpegSize,
+         elapsedMs(decodeStart, decodeEnd),
+         width,
+         height,
+         rendered ? "true" : "false",
+         elapsedMs(drawStart, drawEnd),
+         elapsedMs(totalStart, drawEnd),
+         static_cast<long long>(wallTimeMs()));
+    if (rendered) {
+        LOGI("Received JPEG rendered to main SurfaceView | jpeg=%d bytes | yuv=%dx%d",
+             jpegSize,
+             width,
+             height);
+    }
+    return rendered ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
