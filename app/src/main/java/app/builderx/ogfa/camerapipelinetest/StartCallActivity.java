@@ -37,6 +37,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
     private static final int CAMERA_WIDTH = 2560;
     private static final int CAMERA_HEIGHT = 1440;
     private static final int maxFPS = 30;
+    private static final int DEFAULT_JPEG_QUALITY_PERCENT = 82;
 
     private SurfaceView surfaceView;
     private SurfaceView floatingSurfaceView;
@@ -45,6 +46,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
     private TextView callTimerText;
     private EditText userId;
     private EditText callId;
+    private EditText jpegQualityPercent;
     private Button connectButton;
     private View form;
     private View cameraContainer;
@@ -55,6 +57,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
     private boolean remoteSurfaceReady;
     private boolean receivedRenderRunning;
     private long callStartedAtMs;
+    private volatile int currentJpegQualityPercent = DEFAULT_JPEG_QUALITY_PERCENT;
     private final Object receivedRenderLock = new Object();
     private final Queue<byte[]> receivedJpegQueue = new ArrayDeque<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -92,6 +95,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
         callTimerText = findViewById(R.id.callTimerText);
         userId = findViewById(R.id.startCallUserId);
         callId = findViewById(R.id.startCallCallId);
+        jpegQualityPercent = findViewById(R.id.startCallJpegQualityPercent);
         connectButton = findViewById(R.id.connectCall);
         surfaceView = findViewById(R.id.vulkanSurface);
         floatingSurfaceView = findViewById(R.id.floatingVulkanSurface);
@@ -120,6 +124,10 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
                 new LatestFilteredFrameWorker.FilteredFrameSource() {
                     @Override public int getMaxFps() {
                         return maxFPS;
+                    }
+
+                    @Override public int getJpegQualityPercent() {
+                        return currentJpegQualityPercent;
                     }
 
                     @Override public LatestFilteredFrameWorker.SendResult onLatestFilteredJpeg(
@@ -219,10 +227,13 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
             callId.setError("Required");
             return;
         }
+        currentJpegQualityPercent = readJpegQualityPercentFromInput();
+        jpegQualityPercent.setText(String.valueOf(currentJpegQualityPercent));
         connectButton.setEnabled(false);
         Log.d(TAG, "connect_click | t=" + System.currentTimeMillis()
                 + " userId=" + currentUserId
-                + " callId=" + currentCallId);
+                + " callId=" + currentCallId
+                + " jpegQualityPercent=" + currentJpegQualityPercent);
         connectionStatus.setText(String.format(Locale.US, "Connecting %s to %s...",
                 currentUserId, currentCallId));
         initializeCall(currentUserId, currentCallId);
@@ -447,6 +458,18 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
         long minutes = elapsedSeconds / 60L;
         long seconds = elapsedSeconds % 60L;
         return String.format(Locale.US, "%02d:%02d", minutes, seconds);
+    }
+
+    private int readJpegQualityPercentFromInput() {
+        if (jpegQualityPercent == null) return DEFAULT_JPEG_QUALITY_PERCENT;
+        String value = jpegQualityPercent.getText().toString().trim();
+        if (value.isEmpty()) return DEFAULT_JPEG_QUALITY_PERCENT;
+        try {
+            int percent = Integer.parseInt(value);
+            return Math.max(1, Math.min(100, percent));
+        } catch (NumberFormatException ignored) {
+            return DEFAULT_JPEG_QUALITY_PERCENT;
+        }
     }
 
     private static final class CallJpegStats {

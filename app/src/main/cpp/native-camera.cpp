@@ -672,6 +672,7 @@ public:
         source_ = env->NewGlobalRef(source);
         jclass sourceClass = env->GetObjectClass(source);
         getMaxFps_ = env->GetMethodID(sourceClass, "getMaxFps", "()I");
+        getJpegQualityPercent_ = env->GetMethodID(sourceClass, "getJpegQualityPercent", "()I");
         onLatestFilteredJpeg_ = env->GetMethodID(
                 sourceClass,
                 "onLatestFilteredJpeg",
@@ -728,7 +729,18 @@ private:
         source_ = nullptr;
         javaVm_ = nullptr;
         getMaxFps_ = nullptr;
+        getJpegQualityPercent_ = nullptr;
         onLatestFilteredJpeg_ = nullptr;
+    }
+
+    int getJpegQualityPercent(JNIEnv* env) const {
+        if (!env || !source_ || !getJpegQualityPercent_) return 82;
+        int quality = env->CallIntMethod(source_, getJpegQualityPercent_);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            return 82;
+        }
+        return std::max(1, std::min(100, quality));
     }
 
     bool updateLatestFilteredYuvBuffer(double& copyMs) {
@@ -892,6 +904,7 @@ private:
 
             std::vector<uint8_t> jpeg;
             const auto encodeStart = std::chrono::steady_clock::now();
+            const int jpegQualityPercent = getJpegQualityPercent(env);
             const bool encoded = nativeYuv420ToJpeg(sendFrame.y.data(),
                                                     sendFrame.u.data(),
                                                     sendFrame.v.data(),
@@ -899,12 +912,13 @@ private:
                                                     sendFrame.height,
                                                     sendFrame.yStride,
                                                     sendFrame.uvStride,
-                                                    80,
+                                                    jpegQualityPercent,
                                                     jpeg);
             const auto encodeEnd = std::chrono::steady_clock::now();
             if (encoded) {
-                    LOGI("LatestFrameAvail | jpeg=%zu bytes | %dx%d rotation=%u mirror=%s",
+                    LOGI("LatestFrameAvail | jpeg=%zu bytes | quality=%d | %dx%d rotation=%u mirror=%s",
                          jpeg.size(),
+                         jpegQualityPercent,
                          sendFrame.width,
                          sendFrame.height,
                          sendTransform.rotation,
@@ -950,7 +964,7 @@ private:
                             env->DeleteLocalRef(jpegArray);
                         }
                         const auto callbackEnd = std::chrono::steady_clock::now();
-                        LOGC("Send Frame %lld: camera to filtered yuv420 bufferVersion=%lld copyMs=%.3f yuvBytes=%zu, filtered yuv420 transform rotation=%u mirror=%s transformMs=%.3f transformedSize=%dx%d, transformed yuv420 to jpeg encodeMs=%.3f jpegBytes=%zu size=%dx%d, jpeg callback callbackMs=%.3f, jpeg send websocket sent=%s queued=%s seq=%lld sendMs=%.3f totalMs=%.3f t=%lld",
+                        LOGC("Send Frame %lld: camera to filtered yuv420 bufferVersion=%lld copyMs=%.3f yuvBytes=%zu, filtered yuv420 transform rotation=%u mirror=%s transformMs=%.3f transformedSize=%dx%d, transformed yuv420 to jpeg quality=%d encodeMs=%.3f jpegBytes=%zu size=%dx%d, jpeg callback callbackMs=%.3f, jpeg send websocket sent=%s queued=%s seq=%lld sendMs=%.3f totalMs=%.3f t=%lld",
                              static_cast<long long>(sendFrameIndex_++),
                              static_cast<long long>(frame.version),
                              copyMs,
@@ -960,6 +974,7 @@ private:
                              elapsedMs(transformStart, transformEnd),
                              sendFrame.width,
                              sendFrame.height,
+                             jpegQualityPercent,
                              elapsedMs(encodeStart, encodeEnd),
                              jpeg.size(),
                              sendFrame.width,
@@ -1006,6 +1021,7 @@ private:
     JavaVM* javaVm_ = nullptr;
     jobject source_ = nullptr;
     jmethodID getMaxFps_ = nullptr;
+    jmethodID getJpegQualityPercent_ = nullptr;
     jmethodID onLatestFilteredJpeg_ = nullptr;
 };
 

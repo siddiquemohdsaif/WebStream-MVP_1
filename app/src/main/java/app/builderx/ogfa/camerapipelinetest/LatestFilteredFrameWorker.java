@@ -5,6 +5,7 @@ import android.content.Context;
 public class LatestFilteredFrameWorker {
     public interface FilteredFrameSource {
         int getMaxFps();
+        int getJpegQualityPercent();
         SendResult onLatestFilteredJpeg(byte[] jpeg, int width, int height, long timestampMs);
     }
 

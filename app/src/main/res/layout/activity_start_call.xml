@@ -33,6 +33,17 @@
             android:textColor="#FFFFFFFF"
             android:textColorHint="#99FFFFFF" />
 
+        <EditText
+            android:id="@+id/startCallJpegQualityPercent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:hint="JPEG quality %"
+            android:inputType="number"
+            android:text="82"
+            android:textColor="#FFFFFFFF"
+            android:textColorHint="#99FFFFFF" />
+
         <Button
             android:id="@+id/connectCall"
             android:layout_width="match_parent"
