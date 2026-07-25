@@ -705,6 +705,16 @@ private:
         uint64_t version = 0;
     };
 
+    struct SendYuvFrame {
+        std::vector<uint8_t> y;
+        std::vector<uint8_t> u;
+        std::vector<uint8_t> v;
+        int width = 0;
+        int height = 0;
+        int yStride = 0;
+        int uvStride = 0;
+    };
+
     void releaseSource(JNIEnv* existingEnv) {
         if (source_ && javaVm_) {
             JNIEnv* env = existingEnv;
@@ -756,6 +766,82 @@ private:
         return true;
     }
 
+    static void mapPreviewTransform(float nx,
+                                    float ny,
+                                    int rotation,
+                                    bool mirror,
+                                    float& sxNorm,
+                                    float& syNorm) {
+        if (mirror) nx = 1.0f - nx;
+        sxNorm = nx;
+        syNorm = ny;
+        if (rotation == 90) {
+            sxNorm = ny;
+            syNorm = 1.0f - nx;
+        } else if (rotation == 180) {
+            sxNorm = 1.0f - nx;
+            syNorm = 1.0f - ny;
+        } else if (rotation == 270) {
+            sxNorm = 1.0f - ny;
+            syNorm = nx;
+        }
+    }
+
+    static void transformPlane(const uint8_t* src,
+                               int srcWidth,
+                               int srcHeight,
+                               int srcStride,
+                               uint8_t* dst,
+                               int dstWidth,
+                               int dstHeight,
+                               int rotation,
+                               bool mirror) {
+        for (int dy = 0; dy < dstHeight; ++dy) {
+            uint8_t* out = dst + static_cast<size_t>(dy) * dstWidth;
+            const float ny = (static_cast<float>(dy) + 0.5f) / static_cast<float>(dstHeight);
+            for (int dx = 0; dx < dstWidth; ++dx) {
+                const float nx = (static_cast<float>(dx) + 0.5f) / static_cast<float>(dstWidth);
+                float sxNorm = 0.0f;
+                float syNorm = 0.0f;
+                mapPreviewTransform(nx, ny, rotation, mirror, sxNorm, syNorm);
+                const int sx = std::max(0, std::min(srcWidth - 1,
+                        static_cast<int>(sxNorm * static_cast<float>(srcWidth))));
+                const int sy = std::max(0, std::min(srcHeight - 1,
+                        static_cast<int>(syNorm * static_cast<float>(srcHeight))));
+                out[dx] = src[static_cast<size_t>(sy) * srcStride + sx];
+            }
+        }
+    }
+
+    static bool transformLatestYuvForSend(const LatestYuvFrame& frame,
+                                          const CameraTransformation& transform,
+                                          SendYuvFrame& out) {
+        const int rotation = int(transform.rotation % 360);
+        const bool quarterTurn = rotation == 90 || rotation == 270;
+        out.width = quarterTurn ? frame.height : frame.width;
+        out.height = quarterTurn ? frame.width : frame.height;
+        out.width &= ~1;
+        out.height &= ~1;
+        out.yStride = out.width;
+        out.uvStride = out.width / 2;
+        if (out.width <= 0 || out.height <= 0) return false;
+
+        const uint8_t* srcY = frame.yuv.data();
+        const uint8_t* srcU = frame.yuv.data() + frame.yPlaneBytes;
+        const uint8_t* srcV = frame.yuv.data() + frame.yPlaneBytes + frame.uvPlaneBytes;
+        out.y.resize(static_cast<size_t>(out.width) * out.height);
+        out.u.resize(static_cast<size_t>(out.width / 2) * (out.height / 2));
+        out.v.resize(static_cast<size_t>(out.width / 2) * (out.height / 2));
+
+        transformPlane(srcY, frame.width, frame.height, frame.yStride,
+                       out.y.data(), out.width, out.height, rotation, transform.mirror);
+        transformPlane(srcU, frame.width / 2, frame.height / 2, frame.uvStride,
+                       out.u.data(), out.width / 2, out.height / 2, rotation, transform.mirror);
+        transformPlane(srcV, frame.width / 2, frame.height / 2, frame.uvStride,
+                       out.v.data(), out.width / 2, out.height / 2, rotation, transform.mirror);
+        return true;
+    }
+
     void run() {
         JNIEnv* env = nullptr;
         bool attached = false;
@@ -786,20 +872,43 @@ private:
                 continue;
             }
 
+            CameraTransformation sendTransform = camera_transform_evaluate();
+            SendYuvFrame sendFrame;
+            const auto transformStart = std::chrono::steady_clock::now();
+            const bool transformed = transformLatestYuvForSend(frame, sendTransform, sendFrame);
+            const auto transformEnd = std::chrono::steady_clock::now();
+            if (!transformed) {
+                LOGC("worker_transform_drop | t=%lld bufferVersion=%lld yuvBytes=%zu size=%dx%d rotation=%u mirror=%s",
+                     static_cast<long long>(wallTimeMs()),
+                     static_cast<long long>(frame.version),
+                     frame.yuv.size(),
+                     frame.width,
+                     frame.height,
+                     sendTransform.rotation,
+                     sendTransform.mirror ? "true" : "false");
+                sleepUntilNextTick(nextTick);
+                continue;
+            }
+
             std::vector<uint8_t> jpeg;
             const auto encodeStart = std::chrono::steady_clock::now();
-            const bool encoded = nativeYuv420ToJpeg(frame.yuv.data(),
-                                                    frame.yuv.data() + frame.yPlaneBytes,
-                                                    frame.yuv.data() + frame.yPlaneBytes + frame.uvPlaneBytes,
-                                                    frame.width,
-                                                    frame.height,
-                                                    frame.yStride,
-                                                    frame.uvStride,
+            const bool encoded = nativeYuv420ToJpeg(sendFrame.y.data(),
+                                                    sendFrame.u.data(),
+                                                    sendFrame.v.data(),
+                                                    sendFrame.width,
+                                                    sendFrame.height,
+                                                    sendFrame.yStride,
+                                                    sendFrame.uvStride,
                                                     80,
                                                     jpeg);
             const auto encodeEnd = std::chrono::steady_clock::now();
             if (encoded) {
-                    LOGI("LatestFrameAvail | jpeg=%zu bytes | %dx%d", jpeg.size(), frame.width, frame.height);
+                    LOGI("LatestFrameAvail | jpeg=%zu bytes | %dx%d rotation=%u mirror=%s",
+                         jpeg.size(),
+                         sendFrame.width,
+                         sendFrame.height,
+                         sendTransform.rotation,
+                         sendTransform.mirror ? "true" : "false");
                     if (env && source_ && onLatestFilteredJpeg_) {
                         const auto callbackStart = std::chrono::steady_clock::now();
                         bool sent = false;
@@ -817,8 +926,8 @@ private:
                                     source_,
                                     onLatestFilteredJpeg_,
                                     jpegArray,
-                                    static_cast<jint>(frame.width),
-                                    static_cast<jint>(frame.height),
+                                    static_cast<jint>(sendFrame.width),
+                                    static_cast<jint>(sendFrame.height),
                                     static_cast<jlong>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                             std::chrono::system_clock::now().time_since_epoch()).count()));
                             if (env->ExceptionCheck()) {
@@ -841,15 +950,20 @@ private:
                             env->DeleteLocalRef(jpegArray);
                         }
                         const auto callbackEnd = std::chrono::steady_clock::now();
-                        LOGC("Send Frame %lld: camera to filtered yuv420 bufferVersion=%lld copyMs=%.3f yuvBytes=%zu, filtered yuv420 to jpeg encodeMs=%.3f jpegBytes=%zu size=%dx%d, jpeg callback callbackMs=%.3f, jpeg send websocket sent=%s queued=%s seq=%lld sendMs=%.3f totalMs=%.3f t=%lld",
+                        LOGC("Send Frame %lld: camera to filtered yuv420 bufferVersion=%lld copyMs=%.3f yuvBytes=%zu, filtered yuv420 transform rotation=%u mirror=%s transformMs=%.3f transformedSize=%dx%d, transformed yuv420 to jpeg encodeMs=%.3f jpegBytes=%zu size=%dx%d, jpeg callback callbackMs=%.3f, jpeg send websocket sent=%s queued=%s seq=%lld sendMs=%.3f totalMs=%.3f t=%lld",
                              static_cast<long long>(sendFrameIndex_++),
                              static_cast<long long>(frame.version),
                              copyMs,
                              frame.yuv.size(),
+                             sendTransform.rotation,
+                             sendTransform.mirror ? "true" : "false",
+                             elapsedMs(transformStart, transformEnd),
+                             sendFrame.width,
+                             sendFrame.height,
                              elapsedMs(encodeStart, encodeEnd),
                              jpeg.size(),
-                             frame.width,
-                             frame.height,
+                             sendFrame.width,
+                             sendFrame.height,
                              elapsedMs(callbackStart, callbackEnd),
                              sent ? "true" : "false",
                              queued ? "true" : "false",
