@@ -38,6 +38,10 @@ final class JpegWebSocketTransport {
     private static final int VIDEO_PACKET_TYPE = 1;
     private static final int VIDEO_PACKET_HEADER_BYTES = 33;
     private static final int JPEG_FORMAT_VALUE = 1;
+    private static final int CAMERA_FRONT_FLAG = 1 << 30;
+    private static final int CAMERA_ROTATION_SHIFT = 28;
+    private static final int CAMERA_ROTATION_MASK = 3 << CAMERA_ROTATION_SHIFT;
+    private static final int BITRATE_METADATA_MASK = (1 << CAMERA_ROTATION_SHIFT) - 1;
 
     private final OkHttpClient okHttpClient = new OkHttpClient.Builder().build();
     private final String serverUrl;
@@ -117,7 +121,9 @@ final class JpegWebSocketTransport {
             int frameRateFps,
             int bitrateKbps,
             long timestampMs,
-            long sequence) {
+            long sequence,
+            boolean frontCamera,
+            int rotationDegrees) {
         if (webSocket == null || closed || !joined || !peerConnected || cUuid == 0
                 || jpegData == null || jpegData.length == 0) {
             Log.d(TAG, "send_jpeg_drop | t=" + System.currentTimeMillis()
@@ -140,7 +146,10 @@ final class JpegWebSocketTransport {
         packet.putShort((short) clampUnsignedShort(width));
         packet.putShort((short) clampUnsignedShort(height));
         packet.putShort((short) clampUnsignedShort(frameRateFps));
-        packet.putInt(Math.max(0, bitrateKbps));
+        int metadataFlags = Math.max(0, bitrateKbps) & BITRATE_METADATA_MASK;
+        if (frontCamera) metadataFlags |= CAMERA_FRONT_FLAG;
+        metadataFlags |= rotationCode(rotationDegrees) << CAMERA_ROTATION_SHIFT;
+        packet.putInt(metadataFlags);
         packet.putInt((int) sequence);
         packet.putInt(jpegData.length);
         packet.put(jpegData);
@@ -260,7 +269,7 @@ final class JpegWebSocketTransport {
             int width = Short.toUnsignedInt(packet.getShort());
             int height = Short.toUnsignedInt(packet.getShort());
             int frameRateFps = Short.toUnsignedInt(packet.getShort());
-            packet.getInt();
+            int metadataFlags = packet.getInt();
             long sequence = Integer.toUnsignedLong(packet.getInt());
             int payloadLength = packet.getInt();
 
@@ -273,7 +282,9 @@ final class JpegWebSocketTransport {
 
             byte[] jpegData = new byte[payloadLength];
             packet.get(jpegData);
-            dispatchJpegFrame(frameCUuid, jpegData, width, height, frameRateFps, timestampMs, sequence);
+            dispatchJpegFrame(frameCUuid, jpegData, width, height, frameRateFps,
+                    timestampMs, sequence, (metadataFlags & CAMERA_FRONT_FLAG) != 0,
+                    rotationFromMetadata(metadataFlags));
         }
     }
 
@@ -299,7 +310,9 @@ final class JpegWebSocketTransport {
                         message.optInt("height", 0),
                         message.optInt("frameRateFps", 15),
                         message.optLong("timestampMs", 0L),
-                        message.optLong("sequence", 0L)));
+                        message.optLong("sequence", 0L),
+                        message.optBoolean("frontCamera", false),
+                        message.optInt("rotationDegrees", 0)));
             }
         } catch (IllegalArgumentException error) {
             reportError(error);
@@ -313,7 +326,9 @@ final class JpegWebSocketTransport {
             int height,
             int frameRateFps,
             long timestampMs,
-            long sequence) {
+            long sequence,
+            boolean frontCamera,
+            int rotationDegrees) {
         if (frameCUuid == cUuid || listener == null) {
             return;
         }
@@ -328,7 +343,19 @@ final class JpegWebSocketTransport {
                 height,
                 frameRateFps,
                 timestampMs,
-                sequence));
+                sequence,
+                frontCamera,
+                rotationDegrees));
+    }
+
+    private static int rotationCode(int rotationDegrees) {
+        int normalized = rotationDegrees % 360;
+        if (normalized < 0) normalized += 360;
+        return (normalized / 90) & 0x3;
+    }
+
+    private static int rotationFromMetadata(int metadataFlags) {
+        return ((metadataFlags & CAMERA_ROTATION_MASK) >> CAMERA_ROTATION_SHIFT) * 90;
     }
 
     private void rememberParticipantMappings(JSONArray participants) {

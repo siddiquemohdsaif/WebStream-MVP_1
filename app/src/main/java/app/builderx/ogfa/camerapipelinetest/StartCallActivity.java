@@ -59,7 +59,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
     private long callStartedAtMs;
     private volatile int currentJpegQualityPercent = DEFAULT_JPEG_QUALITY_PERCENT;
     private final Object receivedRenderLock = new Object();
-    private final Queue<byte[]> receivedJpegQueue = new ArrayDeque<>();
+    private final Queue<ReceivedJpegRenderFrame> receivedJpegQueue = new ArrayDeque<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService captureExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService receivedRenderExecutor = Executors.newSingleThreadExecutor();
@@ -83,6 +83,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
     private static native void nativeSetMainPreviewRendering(boolean enabled);
     private static native void nativeSetDisplayRotation(int rotationDegrees);
     private static native boolean nativeRenderJpegToMainSurface(byte[] jpeg, int rotationDegrees, boolean mirror);
+    private static native int[] nativeGetPreviewTransform();
     private static native byte[][] nativeCaptureFilteredYuv420Ring(int[] info);
 
     @Override protected void onCreate(Bundle state) {
@@ -138,8 +139,14 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
                         boolean queued = false;
                         long sequence = 0L;
                         if (activeCall != null && activeCall.getState() == WebStreamCall.State.CONNECTED) {
+                            int[] transform = nativeGetPreviewTransform();
+                            int rotationDegrees = transform != null && transform.length > 0 ? transform[0] : 0;
+                            boolean frontCamera = transform != null && transform.length > 1
+                                    ? transform[1] != 0
+                                    : front;
                             WebStreamCall.SendOutcome outcome =
-                                    activeCall.sendJpeg(jpeg, width, height, maxFPS, 0, timestampMs);
+                                    activeCall.sendJpeg(jpeg, width, height, maxFPS, 0, timestampMs,
+                                            frontCamera, rotationDegrees);
                             sent = outcome.sent;
                             queued = outcome.queued;
                             sequence = outcome.sequence;
@@ -276,10 +283,12 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
 
             @Override public void onJpegReceived(WebStreamJpegFrame frame) {
                 callJpegStats.recordReceived();
-                renderReceivedJpegAsync(frame.getJpegData());
+                renderReceivedJpegAsync(frame);
                 connectionStatus.setText(String.format(Locale.US,
-                        "Received JPEG %dx%d seq=%d",
-                        frame.getWidth(), frame.getHeight(), frame.getSequence()));
+                        "Received JPEG %dx%d seq=%d camera=%s rotation=%d",
+                        frame.getWidth(), frame.getHeight(), frame.getSequence(),
+                        frame.isFrontCamera() ? "front" : "back",
+                        frame.getRotationDegrees()));
             }
 
             @Override public void onDisconnected() {
@@ -325,10 +334,14 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
         showPreCallUi(summary);
     }
 
-    private void renderReceivedJpegAsync(byte[] jpegData) {
+    private void renderReceivedJpegAsync(WebStreamJpegFrame remoteFrame) {
+        byte[] jpegData = remoteFrame == null ? null : remoteFrame.getJpegData();
         if (jpegData == null || jpegData.length == 0) return;
         synchronized (receivedRenderLock) {
-            receivedJpegQueue.add(jpegData);
+            receivedJpegQueue.add(new ReceivedJpegRenderFrame(
+                    jpegData,
+                    remoteFrame.getRotationDegrees(),
+                    remoteFrame.isFrontCamera()));
             if (receivedRenderRunning) {
                 Log.d(TAG, "remote_render_frame_queued | t=" + System.currentTimeMillis()
                         + " bytes=" + jpegData.length
@@ -340,7 +353,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
 
         receivedRenderExecutor.execute(() -> {
             while (true) {
-                byte[] frame;
+                ReceivedJpegRenderFrame frame;
                 synchronized (receivedRenderLock) {
                     frame = receivedJpegQueue.poll();
                     if (frame == null) {
@@ -350,7 +363,10 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
                 }
 
                 boolean rendered = remoteSurfaceReady
-                        && nativeRenderJpegToMainSurface(frame, 0, false);
+                        && nativeRenderJpegToMainSurface(
+                        frame.jpegData,
+                        frame.rotationDegrees,
+                        frame.mirror);
                 if (!rendered) {
                     runOnUiThread(() -> status.setText("Received JPEG render skipped"));
                 }
@@ -469,6 +485,18 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
             return Math.max(1, Math.min(100, percent));
         } catch (NumberFormatException ignored) {
             return DEFAULT_JPEG_QUALITY_PERCENT;
+        }
+    }
+
+    private static final class ReceivedJpegRenderFrame {
+        final byte[] jpegData;
+        final int rotationDegrees;
+        final boolean mirror;
+
+        ReceivedJpegRenderFrame(byte[] jpegData, int rotationDegrees, boolean mirror) {
+            this.jpegData = jpegData;
+            this.rotationDegrees = rotationDegrees;
+            this.mirror = mirror;
         }
     }
 

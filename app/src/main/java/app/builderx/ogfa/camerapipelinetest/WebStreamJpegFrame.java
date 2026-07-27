@@ -8,6 +8,8 @@ public final class WebStreamJpegFrame {
     private final int frameRateFps;
     private final long timestampMs;
     private final long sequence;
+    private final boolean frontCamera;
+    private final int rotationDegrees;
 
     WebStreamJpegFrame(
             String participantId,
@@ -16,7 +18,9 @@ public final class WebStreamJpegFrame {
             int height,
             int frameRateFps,
             long timestampMs,
-            long sequence) {
+            long sequence,
+            boolean frontCamera,
+            int rotationDegrees) {
         this.participantId = participantId;
         this.jpegData = jpegData;
         this.width = width;
@@ -24,6 +28,8 @@ public final class WebStreamJpegFrame {
         this.frameRateFps = Math.max(1, frameRateFps);
         this.timestampMs = timestampMs;
         this.sequence = sequence;
+        this.frontCamera = frontCamera;
+        this.rotationDegrees = normalizeRotation(rotationDegrees);
     }
 
     public String getParticipantId() {
@@ -52,5 +58,19 @@ public final class WebStreamJpegFrame {
 
     public long getSequence() {
         return sequence;
+    }
+
+    public boolean isFrontCamera() {
+        return frontCamera;
+    }
+
+    public int getRotationDegrees() {
+        return rotationDegrees;
+    }
+
+    private static int normalizeRotation(int degrees) {
+        int normalized = degrees % 360;
+        if (normalized < 0) normalized += 360;
+        return (normalized / 90) * 90;
     }
 }

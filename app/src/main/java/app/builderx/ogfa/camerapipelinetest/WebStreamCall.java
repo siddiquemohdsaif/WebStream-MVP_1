@@ -104,7 +104,9 @@ public final class WebStreamCall {
             int height,
             int frameRateFps,
             int bitrateKbps,
-            long timestampMs) {
+            long timestampMs,
+            boolean frontCamera,
+            int rotationDegrees) {
         JpegWebSocketTransport activeTransport = transport;
         if (state != State.CONNECTED || activeTransport == null) {
             Log.d(TAG, "webstream_call_send_drop | t=" + System.currentTimeMillis()
@@ -121,7 +123,9 @@ public final class WebStreamCall {
                 frameRateFps,
                 bitrateKbps,
                 timestampMs,
-                nextSequence);
+                nextSequence,
+                frontCamera,
+                rotationDegrees);
         return new SendOutcome(true, queued, nextSequence);
     }
 
