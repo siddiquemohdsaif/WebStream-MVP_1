@@ -13,7 +13,7 @@
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "CameraVulkan", __VA_ARGS__)
 #define LOGI_NATIVE(...) __android_log_print(ANDROID_LOG_INFO, "NativeCamera", __VA_ARGS__)
-#define LOG_COPY(...) __android_log_print(ANDROID_LOG_DEBUG, "COPY_PIPELINE", __VA_ARGS__)
+#define LOG_COPY(...) __android_log_print(ANDROID_LOG_DEBUG, "XX_PIPELINE_COPY", __VA_ARGS__)
 
 namespace {
 struct Buffer { VkBuffer buffer{}; VkDeviceMemory memory{}; VkDeviceSize size{}; };

@@ -33,7 +33,7 @@ final class JpegWebSocketTransport {
         void onError(Throwable error);
     }
 
-    private static final String TAG = "CALL_PIPELINE";
+    private static final String TAG = "XX_PIPELINE_CALL";
     private static final int NORMAL_CLOSE = 1000;
     private static final int VIDEO_PACKET_TYPE = 1;
     private static final int VIDEO_PACKET_HEADER_BYTES = 33;

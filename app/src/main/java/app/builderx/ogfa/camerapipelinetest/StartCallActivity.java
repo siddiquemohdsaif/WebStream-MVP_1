@@ -32,7 +32,7 @@ import java.util.concurrent.Executors;
 public class StartCallActivity extends AppCompatActivity implements SurfaceHolder.Callback {
     static { System.loadLibrary("camera_pipeline"); }
 
-    private static final String TAG = "CALL_PIPELINE";
+    private static final String TAG = "XX_PIPELINE_CALL";
     private static final int CAMERA_PERMISSION = 43;
     private static final int CAMERA_WIDTH = 2560;
     private static final int CAMERA_HEIGHT = 1440;

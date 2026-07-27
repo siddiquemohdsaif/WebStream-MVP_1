@@ -4,7 +4,7 @@ import android.os.Handler;
 import android.util.Log;
 
 public final class WebStreamCall {
-    private static final String TAG = "CALL_PIPELINE";
+    private static final String TAG = "XX_PIPELINE_CALL";
 
     interface EndListener {
         void onEnded(WebStreamCall call);

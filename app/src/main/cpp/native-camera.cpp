@@ -27,7 +27,7 @@
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "NativeCamera", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "NativeCamera", __VA_ARGS__)
-#define LOGC(...) __android_log_print(ANDROID_LOG_DEBUG, "CALL_PIPELINE", __VA_ARGS__)
+#define LOGC(...) __android_log_print(ANDROID_LOG_DEBUG, "XX_PIPELINE_CALL", __VA_ARGS__)
 
 namespace {
 
