@@ -18,8 +18,6 @@ extern "C" bool nativeYuv420ToJpeg(
 extern "C" bool nativeJpegToYuv420(
         const uint8_t* jpeg,
         size_t jpegSize,
-        std::vector<uint8_t>& y,
-        std::vector<uint8_t>& u,
-        std::vector<uint8_t>& v,
+        std::vector<uint8_t>& yuv420,
         int& width,
         int& height);

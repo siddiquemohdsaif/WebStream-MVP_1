@@ -3,6 +3,16 @@
 #include <algorithm>
 #include <turbojpeg.h>
 
+namespace {
+struct ThreadLocalDecompressor {
+    tjhandle handle = tjInitDecompress();
+
+    ~ThreadLocalDecompressor() {
+        if (handle) tjDestroy(handle);
+    }
+};
+}
+
 extern "C" bool nativeYuv420ToJpeg(
         const uint8_t* y,
         const uint8_t* u,
@@ -50,19 +60,16 @@ extern "C" bool nativeYuv420ToJpeg(
 extern "C" bool nativeJpegToYuv420(
         const uint8_t* jpeg,
         size_t jpegSize,
-        std::vector<uint8_t>& y,
-        std::vector<uint8_t>& u,
-        std::vector<uint8_t>& v,
+        std::vector<uint8_t>& yuv420,
         int& width,
         int& height) {
     width = 0;
     height = 0;
-    y.clear();
-    u.clear();
-    v.clear();
+    yuv420.clear();
     if (!jpeg || jpegSize == 0) return false;
 
-    tjhandle handle = tjInitDecompress();
+    thread_local ThreadLocalDecompressor decompressor;
+    tjhandle handle = decompressor.handle;
     if (!handle) return false;
 
     int jpegSubsamp = -1;
@@ -83,11 +90,15 @@ extern "C" bool nativeJpegToYuv420(
         height = decodedHeight & ~1;
         const int chromaWidth = width / 2;
         const int chromaHeight = height / 2;
-        y.resize(static_cast<size_t>(width) * height);
-        u.resize(static_cast<size_t>(chromaWidth) * chromaHeight);
-        v.resize(static_cast<size_t>(chromaWidth) * chromaHeight);
+        const size_t ySize = static_cast<size_t>(width) * height;
+        const size_t uvSize = static_cast<size_t>(chromaWidth) * chromaHeight;
+        yuv420.resize(ySize + uvSize + uvSize);
 
-        unsigned char* planes[3] = {y.data(), u.data(), v.data()};
+        unsigned char* planes[3] = {
+                yuv420.data(),
+                yuv420.data() + ySize,
+                yuv420.data() + ySize + uvSize
+        };
         int strides[3] = {width, chromaWidth, chromaWidth};
         success = tjDecompressToYUVPlanes(
                 handle,
@@ -100,13 +111,10 @@ extern "C" bool nativeJpegToYuv420(
                 TJFLAG_FASTDCT) == 0;
     }
 
-    tjDestroy(handle);
     if (!success) {
         width = 0;
         height = 0;
-        y.clear();
-        u.clear();
-        v.clear();
+        yuv420.clear();
     }
     return success;
 }

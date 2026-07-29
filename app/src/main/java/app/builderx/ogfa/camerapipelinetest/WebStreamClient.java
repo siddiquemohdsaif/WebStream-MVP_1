@@ -10,7 +10,7 @@ import java.util.Collections;
 import java.util.List;
 
 public final class WebStreamClient {
-    private static final String DEFAULT_SERVER_URL = "ws://168.144.23.108:8080";
+    private static final String DEFAULT_SERVER_URL = "ws://65.20.86.82:8080";
 
     private final Context applicationContext;
     private final String userId;

@@ -7,6 +7,7 @@
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include "native-vulkan-renderer.h"
+#include "remote-yuv-vulkan-renderer.h"
 #include "camera_transformation_evaluator.h"
 #include "camera_preprocess_pipeline.h"
 #include "native-yuv-jpeg.h"
@@ -1212,23 +1213,19 @@ Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetSurface(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeSetRemoteSurface(
-        JNIEnv* env, jclass, jobject surface) {
-    std::lock_guard<std::mutex> lock(gRemoteWindowMutex);
-    if (gRemoteWindow) {
-        ANativeWindow_release(gRemoteWindow);
-        gRemoteWindow = nullptr;
-    }
+        JNIEnv* env, jclass, jobject surface, jobject assetManager) {
     if (!surface) {
-        return env->NewStringUTF("Remote main SurfaceView released");
+        remoteVulkanDestroy();
+        return env->NewStringUTF("Remote Vulkan SurfaceView released");
     }
-    gRemoteWindow = ANativeWindow_fromSurface(env, surface);
-    if (!gRemoteWindow) {
+    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+    if (!window) {
         return env->NewStringUTF("Error: failed to acquire remote main SurfaceView");
     }
-    ANativeWindow_setBuffersGeometry(gRemoteWindow, 0, 0, WINDOW_FORMAT_RGBA_8888);
-    std::ostringstream out;
-    out << "Remote main SurfaceView ready";
-    return env->NewStringUTF(out.str().c_str());
+    AAssetManager* assets = AAssetManager_fromJava(env, assetManager);
+    std::string result = remoteVulkanSetWindow(window, assets);
+    ANativeWindow_release(window);
+    return env->NewStringUTF(result.c_str());
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -1240,22 +1237,26 @@ Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeRenderJpegToMa
     if (jpegSize <= 0) return JNI_FALSE;
 
     const auto javaCopyStart = std::chrono::steady_clock::now();
-    std::vector<uint8_t> jpeg(static_cast<size_t>(jpegSize));
+    thread_local std::vector<uint8_t> receivedJpegBuffer;
+    thread_local std::vector<uint8_t> receivedYuv420Buffer;
+    receivedJpegBuffer.resize(static_cast<size_t>(jpegSize));
     env->GetByteArrayRegion(
             jpegFrame,
             0,
             jpegSize,
-            reinterpret_cast<jbyte*>(jpeg.data()));
+            reinterpret_cast<jbyte*>(receivedJpegBuffer.data()));
     if (env->ExceptionCheck()) return JNI_FALSE;
     const auto javaCopyEnd = std::chrono::steady_clock::now();
 
-    std::vector<uint8_t> y;
-    std::vector<uint8_t> u;
-    std::vector<uint8_t> v;
     int width = 0;
     int height = 0;
     const auto decodeStart = std::chrono::steady_clock::now();
-    if (!nativeJpegToYuv420(jpeg.data(), jpeg.size(), y, u, v, width, height)) {
+    if (!nativeJpegToYuv420(
+            receivedJpegBuffer.data(),
+            receivedJpegBuffer.size(),
+            receivedYuv420Buffer,
+            width,
+            height)) {
         const auto decodeEnd = std::chrono::steady_clock::now();
         LOGC("native_render_received_jpeg_drop | t=%lld reason=decode_failed jpegBytes=%d javaCopyMs=%.3f decodeMs=%.3f",
              static_cast<long long>(wallTimeMs()),
@@ -1267,28 +1268,30 @@ Java_app_builderx_ogfa_camerapipelinetest_StartCallActivity_nativeRenderJpegToMa
     }
     const auto decodeEnd = std::chrono::steady_clock::now();
     const auto drawStart = std::chrono::steady_clock::now();
-    const bool rendered = renderYuv420ToRemoteWindow(
-            y,
-            u,
-            v,
+    const bool rendered = remoteVulkanRenderYuv420(
+            receivedYuv420Buffer.data(),
+            receivedYuv420Buffer.size(),
             width,
             height,
-            static_cast<int>(rotationDegrees),
+            static_cast<uint16_t>(rotationDegrees),
             mirrorFrame == JNI_TRUE);
     const auto drawEnd = std::chrono::steady_clock::now();
-    LOGC("Received Frame %lld: received callback javaCopyMs=%.3f jpegBytes=%d, jpeg to yuv420 decodeMs=%.3f yuvSize=%dx%d, yuv420 to render rendered=%s drawMs=%.3f totalMs=%.3f t=%lld",
+    LOGC("Received Frame %lld: javaByteArrayCopyMs=%.3f jpegBytes=%d, cpuJpegToYuv420DecodeMs=%.3f decodedYuv420Bytes=%zu yuvSize=%dx%d, remoteVulkanWallMs=%.3f rendered=%s rotation=%d mirror=%s totalReceiveRenderMs=%.3f t=%lld",
          static_cast<long long>(gReceivedFrameIndex.fetch_add(1)),
          elapsedMs(javaCopyStart, javaCopyEnd),
          jpegSize,
          elapsedMs(decodeStart, decodeEnd),
+         receivedYuv420Buffer.size(),
          width,
          height,
-         rendered ? "true" : "false",
          elapsedMs(drawStart, drawEnd),
+         rendered ? "true" : "false",
+         static_cast<int>(rotationDegrees),
+         mirrorFrame == JNI_TRUE ? "true" : "false",
          elapsedMs(totalStart, drawEnd),
          static_cast<long long>(wallTimeMs()));
     if (rendered) {
-        LOGI("Received JPEG rendered to main SurfaceView | jpeg=%d bytes | yuv=%dx%d",
+        LOGI("Received JPEG rendered to remote Vulkan SurfaceView | jpeg=%d bytes | yuv=%dx%d",
              jpegSize,
              width,
              height);

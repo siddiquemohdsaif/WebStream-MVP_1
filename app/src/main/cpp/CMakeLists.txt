@@ -4,6 +4,7 @@ project(camera_pipeline LANGUAGES C CXX)
 find_package(libjpeg-turbo REQUIRED CONFIG)
 
 add_library(camera_pipeline SHARED native-camera.cpp native-vulkan-renderer.cpp
+        remote-yuv-vulkan-renderer.cpp
         native-420-vulkan-renderer.cpp
         native-vulkan-feature-test.cpp
         native-yuv-jpeg.cpp

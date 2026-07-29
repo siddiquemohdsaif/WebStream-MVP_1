@@ -79,7 +79,7 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
     private static native String nativeStart(boolean front, int width, int height);
     private static native void nativeStop();
     private static native String nativeSetSurface(Surface surface, android.content.res.AssetManager assets);
-    private static native String nativeSetRemoteSurface(Surface surface);
+    private static native String nativeSetRemoteSurface(Surface surface, android.content.res.AssetManager assets);
     private static native void nativeSetMainPreviewRendering(boolean enabled);
     private static native void nativeSetDisplayRotation(int rotationDegrees);
     private static native boolean nativeRenderJpegToMainSurface(byte[] jpeg, int rotationDegrees, boolean mirror);
@@ -102,20 +102,20 @@ public class StartCallActivity extends AppCompatActivity implements SurfaceHolde
         floatingSurfaceView = findViewById(R.id.floatingVulkanSurface);
         surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override public void surfaceCreated(@NonNull SurfaceHolder holder) {
-                String result = nativeSetRemoteSurface(holder.getSurface());
+                String result = nativeSetRemoteSurface(holder.getSurface(), getAssets());
                 remoteSurfaceReady = !result.startsWith("Error:");
                 status.setText(result);
             }
 
             @Override public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
-                String result = nativeSetRemoteSurface(holder.getSurface());
+                String result = nativeSetRemoteSurface(holder.getSurface(), getAssets());
                 remoteSurfaceReady = !result.startsWith("Error:");
                 status.setText(result);
             }
 
             @Override public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
                 remoteSurfaceReady = false;
-                nativeSetRemoteSurface(null);
+                nativeSetRemoteSurface(null, getAssets());
             }
         });
         floatingSurfaceView.setZOrderMediaOverlay(true);
